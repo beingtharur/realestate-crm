@@ -1,0 +1,13 @@
+{
+  "name": "realtypilot-plots",
+  "version": "1.0.0",
+  "description": "RealtyPilot — CRM, inventory, booking & collections for plot / layout sales teams",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "seed": "node server/seed.js",
+    "test": "node server/test.js"
+  },
+  "engines": { "node": ">=22.5" },
+  "license": "UNLICENSED"
+}
