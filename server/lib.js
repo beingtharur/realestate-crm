@@ -1,6 +1,5 @@
 // Shared helpers + core domain logic (leads, assignment, scoring, pricing, payments).
 const crypto = require('crypto');
-const zlib = require('zlib');
 const { all, get, run, tx } = require('./db');
 
 class HttpError extends Error {
@@ -42,7 +41,7 @@ const str = (v) => (v === undefined || v === null ? null : String(v).trim() || n
 /** Indian mobile: 10 digits starting 6-9; optional +91 / 91 / 0 prefix, spaces & hyphens ignored. */
 function normPhone(p) {
   if (p === undefined || p === null) return null;
-  let s = String(p).replace(/[\s\-().]/g, '');
+  let s = String(p).replace(/\.0+$/, '').replace(/[\s\-().]/g, '');
   if (/^\+91/.test(s)) s = s.slice(3);
   else if (/^91\d{10}$/.test(s)) s = s.slice(2);
   else if (/^0\d{10}$/.test(s)) s = s.slice(1);
@@ -76,13 +75,14 @@ function haversine(lat1, lng1, lat2, lng2) {
   return 2 * R * Math.asin(Math.sqrt(a));
 }
 function parseUA(ua = '') {
+  if (/RealtyPilotCompanion/.test(ua)) return 'Phone app';
   const b = /Edg\//.test(ua) ? 'Edge' : /Chrome\//.test(ua) ? 'Chrome' : /Firefox\//.test(ua) ? 'Firefox' : /Safari\//.test(ua) ? 'Safari' : 'Browser';
   const o = /Android/.test(ua) ? 'Android' : /iPhone|iPad/.test(ua) ? 'iOS' : /Mac OS/.test(ua) ? 'macOS' : /Windows/.test(ua) ? 'Windows' : /Linux/.test(ua) ? 'Linux' : '';
   return `${b}${o ? ' on ' + o : ''}`;
 }
 
 // ---------- CSV / XLSX ----------
-function parseCsv(text) {
+function parseCsv(text, delim = ',') {
   const rows = []; let row = [], f = '', q = false;
   text = String(text).replace(/^﻿/, '');
   for (let i = 0; i < text.length; i++) {
@@ -90,7 +90,7 @@ function parseCsv(text) {
     if (q) {
       if (c === '"') { if (text[i + 1] === '"') { f += '"'; i++; } else q = false; } else f += c;
     } else if (c === '"') q = true;
-    else if (c === ',') { row.push(f); f = ''; }
+    else if (c === delim) { row.push(f); f = ''; }
     else if (c === '\n' || c === '\r') { if (c === '\r' && text[i + 1] === '\n') i++; row.push(f); rows.push(row); row = []; f = ''; }
     else f += c;
   }
@@ -100,56 +100,12 @@ function parseCsv(text) {
 const csvCell = (v) => { v = v === null || v === undefined ? '' : String(v); return /[",\n\r]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v; };
 const toCsv = (rows) => rows.map((r) => r.map(csvCell).join(',')).join('\n');
 
-function parseXlsx(buf) {
-  let eocd = -1;
-  for (let i = buf.length - 22; i >= Math.max(0, buf.length - 70000); i--) if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
-  if (eocd < 0) throw bad('Not a valid .xlsx file');
-  const n = buf.readUInt16LE(eocd + 10);
-  let p = buf.readUInt32LE(eocd + 16);
-  const files = {};
-  for (let i = 0; i < n; i++) {
-    if (buf.readUInt32LE(p) !== 0x02014b50) break;
-    const method = buf.readUInt16LE(p + 10), csize = buf.readUInt32LE(p + 20);
-    const nlen = buf.readUInt16LE(p + 28), elen = buf.readUInt16LE(p + 30), clen = buf.readUInt16LE(p + 32), lho = buf.readUInt32LE(p + 42);
-    files[buf.toString('utf8', p + 46, p + 46 + nlen)] = { method, csize, lho };
-    p += 46 + nlen + elen + clen;
-  }
-  const read = (name) => {
-    const f = files[name]; if (!f) return null;
-    const start = f.lho + 30 + buf.readUInt16LE(f.lho + 26) + buf.readUInt16LE(f.lho + 28);
-    const data = buf.subarray(start, start + f.csize);
-    return (f.method === 0 ? data : zlib.inflateRawSync(data)).toString('utf8');
-  };
-  const unesc = (s) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#(\d+);/g, (_, d) => String.fromCharCode(d)).replace(/&amp;/g, '&');
-  const shared = [];
-  const ss = read('xl/sharedStrings.xml');
-  if (ss) for (const m of ss.matchAll(/<si\b[^>]*>([\s\S]*?)<\/si>/g)) shared.push(unesc([...m[1].matchAll(/<t\b[^>]*>([\s\S]*?)<\/t>/g)].map((x) => x[1]).join('')));
-  const sheetName = Object.keys(files).filter((k) => /^xl\/worksheets\/sheet\d+\.xml$/.test(k)).sort()[0];
-  if (!sheetName) throw bad('No worksheet found in file');
-  const xml = read(sheetName);
-  const colIdx = (ref) => { let n = 0; for (const ch of ref.replace(/\d/g, '')) n = n * 26 + ch.charCodeAt(0) - 64; return n - 1; };
-  const rows = [];
-  for (const rm of xml.matchAll(/<row\b[^>]*>([\s\S]*?)<\/row>/g)) {
-    const row = [];
-    for (const cm of rm[1].matchAll(/<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)) {
-      const ref = /\br="([A-Z]+\d+)"/.exec(cm[1]); if (!ref) continue;
-      const t = (/\bt="(\w+)"/.exec(cm[1]) || [])[1];
-      let v = '';
-      const inner = cm[2] || '';
-      if (t === 'inlineStr') v = unesc([...inner.matchAll(/<t\b[^>]*>([\s\S]*?)<\/t>/g)].map((x) => x[1]).join(''));
-      else { const vm = /<v>([\s\S]*?)<\/v>/.exec(inner); v = vm ? unesc(vm[1]) : ''; if (t === 's') v = shared[Number(v)] ?? ''; else if (/^-?\d+(\.\d+)?[eE]\+?\d+$/.test(v)) v = String(Math.round(Number(v))); }
-      row[colIdx(ref[1])] = v;
-    }
-    rows.push(Array.from(row, (x) => x ?? ''));
-  }
-  return rows;
-}
-
 // ---------- settings ----------
 const DEFAULT_SETTINGS = () => ({
   auto_assign: true, overdue_reminders: true, reps_can_create_leads: true, max_open_leads_per_rep: 0,
-  widgets: { kpis: true, sla: true, funnel: true, hot: true, activity: true, agenda: true, health: true, visits: true, leaderboard: true, collections: true },
-  ai_prompt: '', anthropic_key: '', hold_hours_default: 48, sla_hours: 24, shift_start: '10:00',
+  widgets: { kpis: true, sla: true, funnel: true, hot: true, activity: true, agenda: true, health: true, visits: true, leaderboard: true, inventory: true },
+  ai_prompt: '', anthropic_key: '', hold_hours_default: 48, sla_hours: 24, shift_start: '10:00', shift_end: '19:00', work_days: [1, 2, 3, 4, 5, 6], briefing_time: '09:00',
+  escalation: { enabled: true, remind_min: 15, escalate_min: 30, reassign: false }, source_spend: {},
   geofence: { name: '', lat: null, lng: null, radius: 200, enforce: false },
   webhook_secret: newToken(12), portal_days: 30, company_phone: '', company_address: '',
 });
@@ -159,6 +115,7 @@ function getSettings(oid) {
   const d = DEFAULT_SETTINGS();
   let s = {};
   try { s = JSON.parse(o.settings || '{}'); } catch { /* ignore */ }
+  if (s.widgets && 'collections' in s.widgets) { s.widgets.inventory ??= s.widgets.collections; delete s.widgets.collections; } // that widget was always the plot-inventory overview
   const merged = { ...d, ...s, widgets: { ...d.widgets, ...(s.widgets || {}) }, geofence: { ...d.geofence, ...(s.geofence || {}) } };
   if (!s.webhook_secret) { merged.webhook_secret = d.webhook_secret; run('UPDATE orgs SET settings=? WHERE id=?', JSON.stringify(merged), oid); }
   return merged;
@@ -171,21 +128,29 @@ function saveSettings(oid, patch) {
 }
 
 // ---------- notifications / audit / activity ----------
-function notify(oid, { user, role, title, message = '', link = '' }) {
-  run('INSERT INTO notifications(org_id,user_id,role,title,message,link,created_at) VALUES (?,?,?,?,?,?,?)',
-    oid, user || null, user ? null : role || null, title, message, link, now());
+const KIND_BY_TITLE = [[/assigned|reassigned/i, 'lead'], [/repeat enquiry|enquired again|re-enquiry/i, 'reenquiry'], [/escalat|waiting|not contacted|no response/i, 'escalation'],
+  [/visit/i, 'visit'], [/task|follow/i, 'followup'], [/payment|instal/i, 'payment'], [/today|briefing/i, 'briefing']];
+/** kind = what the user can switch on/off in "My notifications". action_url (e.g. a WhatsApp link) opens when the phone notification is tapped. */
+function notify(oid, { user, role, title, message = '', link = '', kind, action_url, action_label }) {
+  kind = kind || (KIND_BY_TITLE.find(([re]) => re.test(title)) || [0, 'other'])[1];
+  run('INSERT INTO notifications(org_id,user_id,role,title,message,link,created_at,kind,action_url,action_label) VALUES (?,?,?,?,?,?,?,?,?,?)',
+    oid, user || null, user ? null : role || null, title, message, link, now(), kind, action_url || null, action_label || null);
 }
-const notifyAdmins = (oid, title, message, link) => notify(oid, { role: 'admin', title, message, link });
+const notifyAdmins = (oid, title, message, link, extra = {}) => notify(oid, { role: 'admin', title, message, link, ...extra });
 function audit(oid, uid, action, entity, entityId, detail) {
   run('INSERT INTO audit_log(org_id,user_id,action,entity,entity_id,detail,at) VALUES (?,?,?,?,?,?,?)', oid, uid, action, entity, entityId, detail || '', now());
 }
 const TOUCH = new Set(['call', 'whatsapp', 'note', 'stage', 'visit', 'task', 'booking', 'payment']);
 function logActivity(oid, leadId, userId, type, o = {}) {
   const t = now();
-  const r = run('INSERT INTO activities(org_id,lead_id,user_id,type,direction,outcome,duration,content,meta,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)',
-    oid, leadId, userId, type, o.direction, o.outcome, o.duration, o.content, o.meta ? JSON.stringify(o.meta) : null, o.at || t);
-  if (leadId && TOUCH.has(type)) run('UPDATE leads SET last_activity_at=?, updated_at=? WHERE id=? AND org_id=?', o.at || t, t, leadId, oid);
+  const r = run('INSERT INTO activities(org_id,lead_id,user_id,type,direction,outcome,duration,content,meta,created_at,ext_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+    oid, leadId, userId, type, o.direction, o.outcome, o.duration, o.content, o.meta ? JSON.stringify(o.meta) : null, o.at || t, o.ext_id || null);
+  if (leadId && TOUCH.has(type) && o.touch !== false) touchLead(oid, leadId, o.at || t);
   return r.lastInsertRowid;
+}
+/** Mark a lead as worked. `at` may be in the past (a call synced late), so last_activity_at never moves backwards. */
+function touchLead(oid, leadId, at) {
+  run('UPDATE leads SET last_activity_at=MAX(COALESCE(last_activity_at,\'\'),?), updated_at=? WHERE id=? AND org_id=?', at, now(), leadId, oid);
 }
 
 // ---------- scoring ----------
@@ -277,15 +242,17 @@ function assignLead(oid, leadId, repId, actor, { silent = false, reason = '' } =
   const l = get('SELECT * FROM leads WHERE id=? AND org_id=?', leadId, oid);
   if (!l) throw notFound('Lead not found');
   if (repId !== null && !activeMember(oid, repId)) throw bad('That team member is not active');
-  run('UPDATE leads SET assigned_to=?, updated_at=? WHERE id=?', repId, now(), leadId);
+  run('UPDATE leads SET assigned_to=?, assigned_at=?, esc_level=0, updated_at=? WHERE id=?', repId, now(), now(), leadId);
   const who = repId ? get('SELECT name FROM users WHERE id=?', repId).name : 'Unassigned';
   logActivity(oid, leadId, actor ? actor.id : null, 'assign', { content: `Assigned to ${who}${reason ? ' — ' + reason : ''}` });
-  if (repId && !silent && (!actor || actor.id !== repId)) notify(oid, { user: repId, title: 'New lead assigned', message: `${l.name} (${fmtPhone(l.phone_norm)}) was assigned to you`, link: `#/leads/${leadId}` });
+  if (repId && !silent && (!actor || actor.id !== repId)) notify(oid, { user: repId, kind: 'lead', title: 'New lead assigned', message: `${l.name} (${fmtPhone(l.phone_norm)}) was assigned to you`, link: `#/leads/${leadId}`, action_url: `tel:+91${l.phone_norm}`, action_label: 'Call' });
 }
-function pickRep(oid, rule, reps) {
+function pickRep(oid, rule, reps, exclude = 0) {
   const cap = getSettings(oid).max_open_leads_per_rep || 0;
-  let cands = reps.filter((r) => !cap || openLeadCount(oid, r.id) < cap);
+  let cands = reps.filter((r) => r.id !== exclude && isRoutable(oid, r) && (!cap || openLeadCount(oid, r.id) < cap));
   if (!cands.length) return null;
+  const onShift = cands.filter((r) => isOnShift(oid, r));   // prefer people who are working right now; otherwise whoever is not away
+  if (onShift.length) cands = onShift;
   cands.sort((a, b) => a.id - b.id);
   if (rule.strategy === 'fair_workload') {
     return cands.map((r) => ({ r, n: openLeadCount(oid, r.id) })).sort((a, b) => a.n - b.n || a.r.id - b.r.id)[0].r;
@@ -304,7 +271,7 @@ function pickRep(oid, rule, reps) {
   run('UPDATE assign_rules SET rr_pointer=? WHERE id=?', rule.rr_pointer + 1, rule.id);
   return cands[idx];
 }
-function autoAssign(oid, leadId, silent = false) {
+function autoAssign(oid, leadId, silent = false, exclude = 0) {
   if (!getSettings(oid).auto_assign) return null;
   const l = get('SELECT * FROM leads WHERE id=? AND org_id=?', leadId, oid);
   const rules = all('SELECT * FROM assign_rules WHERE org_id=? AND active=1 ORDER BY position,id', oid);
@@ -314,7 +281,7 @@ function autoAssign(oid, leadId, silent = false) {
     if (rule.project_id && rule.project_id !== l.pref_project_id) continue;
     const ids = JSON.parse(rule.rep_ids || '[]');
     const reps = ids.map((id) => activeMember(oid, id)).filter(Boolean);
-    const rep = pickRep(oid, rule, reps);
+    const rep = pickRep(oid, rule, reps, exclude);
     if (rep) { assignLead(oid, leadId, rep.id, null, { silent, reason: `rule "${rule.name}"` }); return rep.id; }
   }
   return null;
@@ -323,8 +290,59 @@ function autoAssign(oid, leadId, silent = false) {
 function distributeLeads(oid, repId, count, actor) {
   const leads = all("SELECT id FROM leads WHERE org_id=? AND assigned_to IS NULL AND stage NOT IN ('Booked','Lost') AND flag_status<>'spam' ORDER BY created_at LIMIT ?", oid, count);
   tx(() => leads.forEach((l) => assignLead(oid, l.id, repId, actor, { silent: true, reason: 'bulk distribution' })));
-  if (leads.length) notify(oid, { user: repId, title: `${leads.length} new leads assigned`, message: `${leads.length} lead(s) were assigned to you`, link: '#/leads' });
+  if (leads.length) notify(oid, { user: repId, kind: 'lead', title: `${leads.length} new leads assigned`, message: `${leads.length} lead(s) were assigned to you`, link: '#/leads' });
   return leads.length;
+}
+
+
+// ---------- availability & notification preferences ----------
+const hm = (v, d) => { const [h, m] = String(v || d).split(':').map(Number); return (h || 0) * 60 + (m || 0); };
+const istClock = (ms = Date.now()) => { const d = new Date(ms + IST); return { dow: d.getUTCDay(), min: d.getUTCHours() * 60 + d.getUTCMinutes(), date: d.toISOString().slice(0, 10) }; };
+/** On leave (until the end date) or switched to off-duty by hand → never receives routed leads. */
+function isRoutable(oid, u, ms = Date.now()) {
+  if (!u || u.status !== 'active') return false;
+  if (u.availability === 'off_duty') return false;
+  if (u.availability === 'on_leave') return !!u.unavailable_until && Date.parse(u.unavailable_until) <= ms;
+  return true;
+}
+function workHours(oid, u) {
+  const s = getSettings(oid);
+  const days = (u.work_days ? String(u.work_days).split(',').map(Number) : s.work_days) || [1, 2, 3, 4, 5, 6];
+  return { start: u.work_start || s.shift_start || '10:00', end: u.work_end || s.shift_end || '19:00', days };
+}
+/** Routable and inside working hours right now (IST). */
+function isOnShift(oid, u, ms = Date.now()) {
+  if (!isRoutable(oid, u, ms)) return false;
+  const w = workHours(oid, u), c = istClock(ms);
+  return w.days.includes(c.dow) && c.min >= hm(w.start) && c.min < hm(w.end);
+}
+/** The moment today's shift began (ms), or null when the person is not on shift today. Used so escalation timers only run while someone is at work. */
+function shiftStartToday(oid, u, ms = Date.now()) {
+  const w = workHours(oid, u), c = istClock(ms);
+  if (!w.days.includes(c.dow)) return null;
+  return ms - (c.min - hm(w.start)) * 60000 - (Math.floor(ms / 1000) % 60) * 1000;
+}
+const PUSH_KINDS = ['lead', 'followup', 'visit', 'escalation', 'briefing', 'reenquiry', 'payment', 'other'];
+const DEFAULT_PREFS = () => ({ kinds: Object.fromEntries(PUSH_KINDS.map((k) => [k, true])), dnd: { enabled: false, start: '21:00', end: '08:00' }, briefing_time: '' });
+function getPrefs(u) {
+  let p = {};
+  try { p = JSON.parse(u.notif_prefs || '{}'); } catch { /* ignore */ }
+  const d = DEFAULT_PREFS();
+  return { kinds: { ...d.kinds, ...(p.kinds || {}) }, dnd: { ...d.dnd, ...(p.dnd || {}) }, briefing_time: /^\d{1,2}:\d{2}$/.test(p.briefing_time || '') ? p.briefing_time : '' };
+}
+/** Inside the user's do-not-disturb window (handles windows that cross midnight). */
+function inDnd(prefs, ms = Date.now()) {
+  if (!prefs.dnd.enabled) return false;
+  const a = hm(prefs.dnd.start), b = hm(prefs.dnd.end), m = istClock(ms).min;
+  return a === b ? false : a < b ? m >= a && m < b : m >= a || m < b;
+}
+const ADMIN_ONLY_NOTICES = ['Payment overdue', 'Payment due in 3 days', 'Payment recorded', 'Discount approval requested', 'Discount approved', 'Discount rejected', 'Overdue task escalation'];
+/** Notifications a user can see (bell + phone). */
+function visibleNotifications(u, { afterId = 0, limit = 60 } = {}) {
+  const ph = ADMIN_ONLY_NOTICES.map(() => '?').join(',');
+  return all(`SELECT n.*, s.read_at FROM notifications n LEFT JOIN notif_state s ON s.notification_id=n.id AND s.user_id=?
+    WHERE n.org_id=? AND n.created_at >= ? AND n.id > ? AND (n.user_id=? OR (n.user_id IS NULL AND (n.role=? OR n.role IS NULL))) AND s.deleted_at IS NULL
+    AND (?='admin' OR n.title NOT IN (${ph})) ORDER BY n.id DESC LIMIT ?`, u.id, u.org_id, u.created_at, afterId, u.id, u.role, u.role, ...ADMIN_ONLY_NOTICES, limit);
 }
 
 // ---------- stage / automation ----------
@@ -376,10 +394,22 @@ function createLead(oid, actor, d, opts = {}) {
   const dups = findDuplicates(oid, pn, email);
   if (dups.length && opts.intake) {
     const ex = get('SELECT * FROM leads WHERE id=?', dups[0].id);
+    const projName = projectId ? get('SELECT name FROM projects WHERE id=?', projectId)?.name : '';
     logEnquiry(oid, pn, projectId, d.source);
-    logActivity(oid, ex.id, null, 'system', { content: `Repeat enquiry via ${d.source || 'intake'}${projectId ? ' for ' + get('SELECT name FROM projects WHERE id=?', projectId).name : ''}` });
+    // bump: back to the top of the owner's list, reopened if it had been given up on
+    run('UPDATE leads SET reenquiry_at=?, reenquiry_count=reenquiry_count+1, esc_level=0, assigned_at=COALESCE(assigned_at,?), updated_at=? WHERE id=?', now(), now(), now(), ex.id);
+    if (ex.stage === 'Lost') setStage(oid, ex.id, 'New', actor || { id: null, name: 'System' }, { allowBooked: false });
+    logActivity(oid, ex.id, null, 'system', { content: `Enquired again via ${d.source || 'intake'}${projName ? ' for ' + projName : ''}` });
+    touchLead(oid, ex.id, now());
     checkFlags(oid, ex.id, pn);
-    if (ex.assigned_to) notify(oid, { user: ex.assigned_to, title: 'Repeat enquiry', message: `${ex.name} enquired again via ${d.source || 'intake'}`, link: `#/leads/${ex.id}` });
+    let owner = ex.assigned_to;
+    if (!owner) { autoAssign(oid, ex.id, true); owner = get('SELECT assigned_to FROM leads WHERE id=?', ex.id).assigned_to; }
+    const msg = `${ex.name} (${fmtPhone(ex.phone_norm)}) enquired again via ${d.source || 'intake'}${projName ? ' — ' + projName : ''}`;
+    if (owner) {
+      run("INSERT INTO tasks(org_id,lead_id,title,description,due_at,priority,assigned_to,created_at) VALUES (?,?,?,?,?,?,?,?)", oid, ex.id, `Call back — enquired again`, msg, addMs(15 * 60000), 'High', owner, now());
+      notify(oid, { user: owner, kind: 'reenquiry', title: 'Enquired again — call now', message: msg, link: `#/leads/${ex.id}` });
+    } else notifyAdmins(oid, 'Enquired again — unassigned lead', msg, `#/leads/${ex.id}`, { kind: 'reenquiry' });
+    rescore(oid, ex.id);
     return { lead: get('SELECT * FROM leads WHERE id=?', ex.id), created: false };
   }
   if (dups.length && !opts.force) throw new HttpError(409, 'Possible duplicate lead found', { duplicates: dups });
@@ -388,17 +418,19 @@ function createLead(oid, actor, d, opts = {}) {
   else if (actor && actor.role === 'rep') assigned = actor.id;
   const t = now();
   const r = run(`INSERT INTO leads(org_id,name,phone,phone_norm,email,source,partner_id,stage,budget_min,budget_max,pref_size_min,pref_size_max,
-    pref_facing,pref_location,pref_project_id,purpose,assigned_to,notes,custom,consent,created_by,created_at,updated_at,last_activity_at)
-    VALUES (?,?,?,?,?,?,?,'New',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    pref_facing,pref_location,pref_project_id,purpose,assigned_to,notes,custom,consent,created_by,created_at,updated_at,last_activity_at,assigned_at)
+    VALUES (?,?,?,?,?,?,?,'New',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     oid, name, pn, pn, email, str(d.source) || 'Other', d.partner_id ? Number(d.partner_id) : null, num(d.budget_min), num(d.budget_max),
     num(d.pref_size_min), num(d.pref_size_max), str(d.pref_facing), str(d.pref_location), projectId, str(d.purpose), assigned, str(d.notes),
-    JSON.stringify(custom), d.consent === false ? 0 : 1, actor ? actor.id : null, t, t, null);
+    JSON.stringify(custom), d.consent === false ? 0 : 1, actor ? actor.id : null, t, t, null, assigned ? t : null);
   const id = Number(r.lastInsertRowid);
   logActivity(oid, id, actor ? actor.id : null, 'system', { content: `Lead created${d.source ? ' via ' + d.source : ''}${actor ? ' by ' + actor.name : ''}` });
   logEnquiry(oid, pn, projectId, d.source);
   if (assigned) {
-    if (!opts.silent && (!actor || actor.id !== assigned)) notify(oid, { user: assigned, title: 'New lead assigned', message: `${name} (${fmtPhone(pn)}) was assigned to you`, link: `#/leads/${id}` });
-  } else autoAssign(oid, id, opts.silent);
+    if (!opts.silent && (!actor || actor.id !== assigned)) notify(oid, { user: assigned, kind: 'lead', title: 'New lead assigned', message: `${name} (${fmtPhone(pn)}) was assigned to you`, link: `#/leads/${id}`, action_url: `tel:+91${pn}`, action_label: 'Call' });
+  } else if (autoAssign(oid, id, opts.silent) === null && getSettings(oid).auto_assign && !opts.silent && get('SELECT 1 x FROM assign_rules WHERE org_id=? AND active=1', oid)) {
+    notifyAdmins(oid, 'New lead — nobody available', `${name} (${fmtPhone(pn)}) could not be assigned automatically: the reps on the routing rules are on leave, off duty or at their lead limit`, `#/leads/${id}`, { kind: 'escalation' });
+  }
   checkFlags(oid, id, pn);
   rescore(oid, id);
   const lead = get('SELECT * FROM leads WHERE id=?', id);
@@ -451,10 +483,40 @@ function nextNo(oid, prefix, table, col) {
   return no;
 }
 
+// ---------- calls ----------
+// Stored outcomes. "Connected" is shown to users as "Completed"; "Initiated" is a call started from the CRM
+// that the phone has not reported back yet.
+const CALL_OUTCOMES = ['Connected', 'Not Answered', 'Busy', 'Switched Off', 'Wrong Number', 'Voicemail', 'Missed', 'Rejected', 'Failed'];
+const CALL_PENDING = 'Initiated';
+/** True when this user has signed in from the Android companion app in the last 30 days. */
+function companionSession(userId) {
+  return get("SELECT device,last_seen FROM sessions WHERE user_id=? AND ended_at IS NULL AND device LIKE 'Phone app%' AND last_seen>? ORDER BY last_seen DESC LIMIT 1", userId, addMs(-30 * 864e5)) || null;
+}
+/**
+ * The one place a call is written to a lead's timeline — manual log, telephony webhook and phone app all use it.
+ * c: { direction, outcome, duration (sec), started_at, notes, phone, source: 'manual'|'webhook'|'device', ext_id, activity_id }
+ * activity_id completes an existing "Initiated" entry instead of adding a second one.
+ */
+function recordCall(oid, actor, lead, c) {
+  const duration = c.outcome === 'Connected' ? Math.max(0, Math.round(Number(c.duration) || 0)) : 0;
+  const started = c.started_at || now();
+  const meta = { source: c.source || 'manual', phone: c.phone || lead.phone_norm, ended_at: c.started_at ? addMs(duration * 1000, Date.parse(started)) : now() };
+  let id = c.activity_id;
+  if (id) {
+    run('UPDATE activities SET user_id=?, direction=?, outcome=?, duration=?, content=COALESCE(?,content), meta=?, created_at=?, ext_id=COALESCE(?,ext_id) WHERE id=? AND org_id=?',
+      actor.id, c.direction, c.outcome, duration, str(c.notes), JSON.stringify(meta), started, c.ext_id || null, id, oid);
+    touchLead(oid, lead.id, started);
+  } else id = Number(logActivity(oid, lead.id, actor.id, 'call', { direction: c.direction, outcome: c.outcome, duration, content: str(c.notes), meta, at: started, ext_id: c.ext_id }));
+  if (lead.stage === 'New' && c.outcome === 'Connected') setStage(oid, lead.id, 'Contacted', actor);
+  rescore(oid, lead.id);
+  return id;
+}
+
 module.exports = {
   HttpError, bad, forbidden, notFound, STAGES, OPEN_STAGES, LOST_REASONS, SOURCES, now, addMs, sha, newToken, hashPw, checkPw,
-  round, num, str, normPhone, fmtPhone, period, dayRange, istDate, haversine, parseUA, parseCsv, toCsv, parseXlsx,
+  round, num, str, normPhone, fmtPhone, period, dayRange, istDate, haversine, parseUA, parseCsv, toCsv,
   getOrg, getSettings, saveSettings, notify, notifyAdmins, audit, logActivity, rescore, activeMember, repHealth, openLeadCount,
+  isRoutable, isOnShift, workHours, shiftStartToday, istClock, hm, getPrefs, inDnd, PUSH_KINDS, ADMIN_ONLY_NOTICES, visibleNotifications,
   cleanCustom, findDuplicates, checkFlags, logEnquiry, assignLead, autoAssign, distributeLeads, runAutomation, setStage,
-  createLead, priceFor, instStatus, allocatePayment, bookingSummary, nextNo, LEAD_TEXT,
+  createLead, priceFor, CALL_OUTCOMES, CALL_PENDING, companionSession, recordCall, touchLead, instStatus, allocatePayment, bookingSummary, nextNo, LEAD_TEXT,
 };

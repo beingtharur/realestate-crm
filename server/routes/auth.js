@@ -4,16 +4,26 @@ const { all, get, run, tx } = require('../db');
 const L = require('../lib');
 const { HttpError, bad, notFound, now, addMs, sha, newToken, hashPw, checkPw, str } = L;
 
-const publicUser = (u) => { const { password_hash, failed_attempts, locked_until, session_id, ...rest } = u; return rest; };
+const publicUser = (u) => { const { password_hash, failed_attempts, locked_until, session_id, notif_prefs, last_briefing, ...rest } = u; return rest; };
+// The Android companion app signs in with client:'companion' — its sessions are how the CRM knows a phone is linked.
+const deviceLabel = (ctx) => (ctx.body?.client === 'companion' ? `Phone app · ${String(ctx.body.device_name || 'Android').replace(/[^\w .\-+()]/g, '').slice(0, 40)}` : L.parseUA(ctx.ua));
 function newSession(u, ctx) {
   const token = newToken();
-  run('INSERT INTO sessions(token_hash,user_id,org_id,device,ip,created_at,last_seen) VALUES (?,?,?,?,?,?,?)', sha(token), u.id, u.org_id, L.parseUA(ctx.ua), ctx.ip, now(), now());
+  run('INSERT INTO sessions(token_hash,user_id,org_id,device,ip,created_at,last_seen) VALUES (?,?,?,?,?,?,?)', sha(token), u.id, u.org_id, deviceLabel(ctx), ctx.ip, now(), now());
   run('UPDATE users SET last_active_at=? WHERE id=?', now(), u.id);
   return token;
 }
 function checkPassword(pw) { if (typeof pw !== 'string' || pw.length < 8) throw bad('Password must be at least 8 characters'); }
 
 // ----- org setup & login -----
+// logo arrives as a small data URL (the browser downsizes it first); '' clears it
+function cleanLogo(v) {
+  if (v === undefined) return undefined;
+  if (v === null || v === '') return null;
+  if (typeof v !== 'string' || !/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(v)) throw bad('Logo must be a PNG, JPG or WebP image');
+  if (v.length > 400000) throw bad('Logo is too large — use an image under 300 KB');
+  return v;
+}
 r.post('/api/auth/setup', { public: true }, (ctx) => {
   const b = ctx.body;
   const org_name = str(b.org_name), code = str(b.org_code), name = str(b.name), email = str(b.email)?.toLowerCase();
@@ -21,10 +31,11 @@ r.post('/api/auth/setup', { public: true }, (ctx) => {
   if (!/^[A-Za-z0-9_-]{3,20}$/.test(code)) throw bad('Org code must be 3–20 letters, numbers, - or _');
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw bad('Email format is invalid');
   checkPassword(b.password);
+  const logo = cleanLogo(b.logo) || null;
   if (get('SELECT 1 x FROM orgs WHERE code=?', code)) throw bad('That organization code is already taken');
   if (get('SELECT 1 x FROM users WHERE email=?', email)) throw bad('That email is already registered on the platform');
   const out = tx(() => {
-    const o = run('INSERT INTO orgs(name,code,city,settings,created_at) VALUES (?,?,?,?,?)', org_name, code, str(b.city), '{}', now());
+    const o = run('INSERT INTO orgs(name,code,city,settings,created_at,logo) VALUES (?,?,?,?,?,?)', org_name, code, str(b.city), '{}', now(), logo);
     const oid = Number(o.lastInsertRowid);
     const u = run('INSERT INTO users(org_id,name,email,phone,role,password_hash,created_at) VALUES (?,?,?,?,?,?,?)', oid, name, email, L.normPhone(b.phone), 'admin', hashPw(b.password), now());
     L.getSettings(oid);
@@ -65,7 +76,7 @@ r.get('/api/auth/me', (ctx) => {
   const org = L.getOrg(ctx.oid);
   const s = L.getSettings(ctx.oid);
   const settings = ctx.isAdmin ? { ...s, anthropic_key: s.anthropic_key ? '••••' + s.anthropic_key.slice(-4) : '' } : { widgets: s.widgets, reps_can_create_leads: s.reps_can_create_leads, hold_hours_default: s.hold_hours_default };
-  return { user: publicUser(ctx.user), org: { id: org.id, name: org.name, code: org.code, city: org.city, plan: org.plan }, settings };
+  return { user: publicUser(ctx.user), org: { id: org.id, name: org.name, code: org.code, city: org.city, plan: org.plan, logo: org.logo || null }, settings, companion: L.companionSession(ctx.user.id) };
 });
 
 r.post('/api/heartbeat', (ctx) => { run('UPDATE sessions SET last_seen=? WHERE id=?', now(), ctx.user.session_id); return { ok: true }; });
@@ -136,7 +147,7 @@ r.get('/api/public/org/:code', { public: true }, (ctx) => {
 r.get('/api/meta', (ctx) => ({
   stages: L.STAGES, lost_reasons: L.LOST_REASONS, sources: L.SOURCES,
   users: all('SELECT id,name,role,status,phone,specialization FROM users WHERE org_id=? ORDER BY name', ctx.oid),
-  projects: all('SELECT id,name,city,location,status,max_discount_pct FROM projects WHERE org_id=? ORDER BY name', ctx.oid),
+  projects: all(`SELECT id,name,city,location,status${ctx.isAdmin ? ',max_discount_pct' : ''} FROM projects WHERE org_id=? ORDER BY name`, ctx.oid),
   partners: all('SELECT id,name,type,commission_pct,active FROM partners WHERE org_id=? ORDER BY name', ctx.oid),
   custom_fields: all('SELECT * FROM custom_fields WHERE org_id=? ORDER BY position,id', ctx.oid).map((f) => ({ ...f, options: JSON.parse(f.options || '[]') })),
   templates: all('SELECT * FROM templates WHERE org_id=? ORDER BY id', ctx.oid),
@@ -149,6 +160,13 @@ r.put('/api/settings', { admin: true }, (ctx) => {
   for (const k of ['max_open_leads_per_rep', 'hold_hours_default', 'sla_hours', 'portal_days']) if (k in b) patch[k] = Math.max(0, Number(b[k]) || 0);
   for (const k of ['ai_prompt', 'shift_start', 'company_phone', 'company_address']) if (k in b) patch[k] = String(b[k] || '');
   if ('anthropic_key' in b && !String(b.anthropic_key).startsWith('••••')) patch.anthropic_key = String(b.anthropic_key || '').trim();
+  for (const k of ['shift_end', 'briefing_time']) if (k in b) { if (b[k] && !/^([01]?\d|2[0-3]):[0-5]\d$/.test(b[k])) throw bad('Enter times as HH:MM'); patch[k] = String(b[k] || ''); }
+  if (Array.isArray(b.work_days)) patch.work_days = b.work_days.map(Number).filter((x) => x >= 0 && x <= 6);
+  if (b.escalation && typeof b.escalation === 'object') {
+    const e = b.escalation, remind = Math.min(240, Math.max(1, Number(e.remind_min) || 15));
+    patch.escalation = { enabled: !!e.enabled, remind_min: remind, escalate_min: Math.min(480, Math.max(remind + 1, Number(e.escalate_min) || 30)), reassign: !!e.reassign };
+  }
+  if (b.source_spend && typeof b.source_spend === 'object') patch.source_spend = Object.fromEntries(Object.entries(b.source_spend).map(([k, v]) => [String(k).slice(0, 60), Math.max(0, Number(v) || 0)]).filter(([, v]) => v > 0));
   if (b.widgets && typeof b.widgets === 'object') patch.widgets = Object.fromEntries(Object.entries(b.widgets).map(([k, v]) => [k, !!v]));
   if (b.geofence) {
     const g = b.geofence;
@@ -156,6 +174,7 @@ r.put('/api/settings', { admin: true }, (ctx) => {
   }
   if (b.regenerate_webhook_secret) patch.webhook_secret = newToken(12);
   if (b.org_name || b.city !== undefined) run('UPDATE orgs SET name=COALESCE(?,name), city=COALESCE(?,city) WHERE id=?', str(b.org_name), str(b.city), ctx.oid);
+  if (b.logo !== undefined) run('UPDATE orgs SET logo=? WHERE id=?', cleanLogo(b.logo), ctx.oid);
   L.saveSettings(ctx.oid, patch);
   L.audit(ctx.oid, ctx.user.id, 'settings.update', 'org', ctx.oid, Object.keys(patch).join(','));
   return { ok: true };
@@ -180,11 +199,13 @@ r.del('/api/custom-fields/:id', { admin: true }, (ctx) => {
 });
 
 // ----- notifications -----
-const NOTIF_WHERE = `n.org_id=? AND n.created_at >= ? AND (n.user_id=? OR (n.user_id IS NULL AND (n.role=? OR n.role IS NULL))) AND s.deleted_at IS NULL`;
+// Finance / discount / collections notices are for admins only
+const ADMIN_ONLY_NOTICES = "'Payment overdue','Payment due in 3 days','Payment recorded','Discount approval requested','Discount approved','Discount rejected','Overdue task escalation'";
+const NOTIF_WHERE = `n.org_id=? AND n.created_at >= ? AND (n.user_id=? OR (n.user_id IS NULL AND (n.role=? OR n.role IS NULL))) AND s.deleted_at IS NULL AND (?='admin' OR n.title NOT IN (${ADMIN_ONLY_NOTICES}))`;
 r.get('/api/notifications', (ctx) => {
   const u = ctx.user;
   const rows = all(`SELECT n.*, s.read_at FROM notifications n LEFT JOIN notif_state s ON s.notification_id=n.id AND s.user_id=? WHERE ${NOTIF_WHERE} ORDER BY n.id DESC LIMIT 60`,
-    u.id, u.org_id, u.created_at, u.id, u.role);
+    u.id, u.org_id, u.created_at, u.id, u.role, u.role);
   const unread = get(`SELECT COUNT(*) c FROM notifications n LEFT JOIN notif_state s ON s.notification_id=n.id AND s.user_id=? WHERE ${NOTIF_WHERE} AND s.read_at IS NULL`,
     u.id, u.org_id, u.created_at, u.id, u.role).c;
   return { unread, items: rows };
@@ -192,7 +213,7 @@ r.get('/api/notifications', (ctx) => {
 const upsertState = (nid, uid, col) => run(`INSERT INTO notif_state(notification_id,user_id,${col}) VALUES (?,?,?) ON CONFLICT(notification_id,user_id) DO UPDATE SET ${col}=excluded.${col}`, nid, uid, now());
 r.post('/api/notifications/read-all', (ctx) => {
   const u = ctx.user;
-  const ids = all(`SELECT n.id FROM notifications n LEFT JOIN notif_state s ON s.notification_id=n.id AND s.user_id=? WHERE ${NOTIF_WHERE} AND s.read_at IS NULL`, u.id, u.org_id, u.created_at, u.id, u.role);
+  const ids = all(`SELECT n.id FROM notifications n LEFT JOIN notif_state s ON s.notification_id=n.id AND s.user_id=? WHERE ${NOTIF_WHERE} AND s.read_at IS NULL`, u.id, u.org_id, u.created_at, u.id, u.role, u.role);
   tx(() => ids.forEach((n) => upsertState(n.id, u.id, 'read_at')));
   return { ok: true };
 });

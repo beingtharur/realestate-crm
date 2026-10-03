@@ -49,7 +49,7 @@ r.get('/api/dashboard', (ctx) => {
     range, scope: ctx.isAdmin ? 'org' : 'me',
     kpis: {
       total_leads: leadRow.total, hot_leads: leadRow.hot || 0, followups, site_visits: visitsN, conversion_rate: pct(leadRow.won || 0, leadRow.total), pipeline_value: leadRow.pipeline,
-      bookings: sales.c, sales_value: sales.v, collected,
+      bookings: sales.c, sales_value: sales.v, ...(ctx.isAdmin ? { collected } : {}),
     },
     sla: { overdue: get(taskBase + ' AND t.due_at<?', oid, ...st.args, nowIso).c, due_today: get(taskBase + ' AND t.due_at>=? AND t.due_at<?', oid, ...st.args, nowIso, eod).c,
       upcoming: get(taskBase + ' AND t.due_at>=?', oid, ...st.args, eod).c, all: get(taskBase, oid, ...st.args).c, on_time_pct: pct(doneRows.ontime || 0, doneRows.n) },
@@ -58,13 +58,25 @@ r.get('/api/dashboard', (ctx) => {
       WHERE l.org_id=? AND l.rating='Hot' AND l.stage NOT IN ('Booked','Lost')${sl.sql} ORDER BY l.score DESC, l.updated_at DESC LIMIT 6`, oid, ...sl.args),
     activity: all(`SELECT a.id,a.type,a.content,a.created_at,a.lead_id,l.name AS lead_name,u.name AS user_name FROM activities a JOIN leads l ON l.id=a.lead_id LEFT JOIN users u ON u.id=a.user_id
       WHERE a.org_id=? AND a.type<>'assign'${sl.sql} ORDER BY a.id DESC LIMIT 15`, oid, ...sl.args),
-    agenda: all(`SELECT t.id,t.title,t.due_at,t.priority,t.lead_id,l.name AS lead_name,u.name AS assignee FROM tasks t LEFT JOIN leads l ON l.id=t.lead_id LEFT JOIN users u ON u.id=t.assigned_to
+    agenda: all(`SELECT t.id,t.title,t.due_at,t.priority,t.lead_id,l.name AS lead_name,l.phone_norm AS lead_phone,u.name AS assignee FROM tasks t LEFT JOIN leads l ON l.id=t.lead_id LEFT JOIN users u ON u.id=t.assigned_to
       WHERE t.org_id=? AND t.status='open' AND t.due_at<?${st.sql} ORDER BY t.due_at LIMIT 15`, oid, eod, ...st.args),
     visits: all(`SELECT v.id,v.scheduled_at,v.lead_id,l.name AS lead_name,pr.name AS project_name,pl.plot_no,u.name AS rep_name FROM visits v JOIN leads l ON l.id=v.lead_id JOIN projects pr ON pr.id=v.project_id
       LEFT JOIN plots pl ON pl.id=v.plot_id LEFT JOIN users u ON u.id=v.assigned_to WHERE v.org_id=? AND v.status='scheduled' AND v.scheduled_at>=?${vScope} ORDER BY v.scheduled_at LIMIT 8`, oid, L.dayRange(today).from, ...vArgs),
-    collections: { outstanding: dues.outstanding, overdue: dues.overdue, overdue_bookings: dues.overdue_bookings },
+    ...(ctx.isAdmin ? { collections: { outstanding: dues.outstanding, overdue: dues.overdue, overdue_bookings: dues.overdue_bookings } } : {}),
     inventory: { available: plots.available || 0, hold: plots.hold || 0, booked: plots.booked || 0, sold: plots.sold || 0, total: Object.values(plots).reduce((a, b) => a + b, 0) },
   };
+  // "What needs me right now": counts + the first few records behind them
+  const t0 = L.dayRange(today).from;
+  out.focus = {
+    overdue_followups: out.sla.overdue, due_today: out.sla.due_today,
+    new_uncontacted: get(`SELECT COUNT(*) c FROM leads l WHERE l.org_id=? AND l.stage='New' AND l.last_activity_at IS NULL AND l.flag_status<>'spam'${sl.sql}`, oid, ...sl.args).c,
+    hot_cooling: get(`SELECT COUNT(*) c FROM leads l WHERE l.org_id=? AND l.rating='Hot' AND l.stage NOT IN ('Booked','Lost') AND COALESCE(l.last_activity_at,l.created_at)<?${sl.sql}`, oid, addMs(-48 * 3600e3), ...sl.args).c,
+    visits_today: get(`SELECT COUNT(*) c FROM visits v JOIN leads l ON l.id=v.lead_id WHERE v.org_id=? AND v.status='scheduled' AND v.scheduled_at>=? AND v.scheduled_at<?${vScope}`, oid, t0, eod, ...vArgs).c,
+  };
+  const leadCols = 'l.id,l.name,l.phone_norm,l.source,l.rating,l.stage,l.created_at,l.last_activity_at,pr.name AS project_name,u.name AS rep_name';
+  const leadJoin = 'FROM leads l LEFT JOIN projects pr ON pr.id=l.pref_project_id LEFT JOIN users u ON u.id=l.assigned_to';
+  out.new_leads = all(`SELECT ${leadCols} ${leadJoin} WHERE l.org_id=? AND l.stage='New' AND l.last_activity_at IS NULL AND l.flag_status<>'spam'${sl.sql} ORDER BY l.created_at DESC LIMIT 6`, oid, ...sl.args);
+  out.cooling_leads = all(`SELECT ${leadCols} ${leadJoin} WHERE l.org_id=? AND l.rating='Hot' AND l.stage NOT IN ('Booked','Lost') AND COALESCE(l.last_activity_at,l.created_at)<?${sl.sql} ORDER BY COALESCE(l.last_activity_at,l.created_at) LIMIT 6`, oid, addMs(-48 * 3600e3), ...sl.args);
   if (ctx.isAdmin) {
     out.health = all("SELECT * FROM users WHERE org_id=? AND role='rep' AND status='active' ORDER BY name", oid).map((u) => ({ id: u.id, name: u.name, ...L.repHealth(oid, u) }));
     out.leaderboard = leaderboard(oid, range).slice(0, 8);
@@ -101,9 +113,15 @@ r.get('/api/reports', { admin: true }, (ctx) => {
   const lostN = get("SELECT COUNT(*) c FROM leads WHERE org_id=? AND stage='Lost' AND created_at>=? AND created_at<?", oid, p.from, p.to).c;
   reached[0].count += lostN; // leads that were created and later lost still entered the funnel
   const funnel = reached.map((x, i) => ({ ...x, dropoff_pct: i === 0 ? 0 : pct(reached[i - 1].count - x.count, reached[i - 1].count), of_total_pct: pct(x.count, reached[0].count) }));
+  const spendMap = L.getSettings(oid).source_spend || {};
   const sources = all(`SELECT COALESCE(l.source,'Unknown') AS source, COUNT(*) leads, SUM(CASE WHEN l.rating='Hot' THEN 1 ELSE 0 END) hot, SUM(CASE WHEN l.stage='Booked' THEN 1 ELSE 0 END) booked,
       SUM(CASE WHEN l.stage='Lost' THEN 1 ELSE 0 END) lost FROM leads l WHERE l.org_id=? AND l.created_at>=? AND l.created_at<? GROUP BY 1 ORDER BY leads DESC`, oid, p.from, p.to)
-    .map((s) => ({ ...s, conversion: pct(s.booked, s.leads) }));
+    .map((s) => {
+      const visited = get("SELECT COUNT(DISTINCT v.lead_id) c FROM visits v JOIN leads l ON l.id=v.lead_id WHERE l.org_id=? AND COALESCE(l.source,'Unknown')=? AND v.status='completed' AND l.created_at>=? AND l.created_at<?", oid, s.source, p.from, p.to).c;
+      const days = range === 'all' ? Math.max(1, (Date.now() - Date.parse(get('SELECT MIN(created_at) m FROM leads WHERE org_id=?', oid).m || now())) / 864e5) : Math.max(1, (Date.parse(p.to) - Date.parse(p.from)) / 864e5);
+      const monthly = (spendMap[s.source] || 0), spend = Math.round(monthly * Math.min(days, 3650) / 30);
+      return { ...s, visited, lead_to_visit: pct(visited, s.leads), visit_to_booking: pct(s.booked, visited), conversion: pct(s.booked, s.leads), spend, cost_per_lead: spend && s.leads ? Math.round(spend / s.leads) : null, cost_per_booking: spend && s.booked ? Math.round(spend / s.booked) : null };
+    });
   const projects = all('SELECT * FROM projects WHERE org_id=? ORDER BY name', oid).map((pr) => {
     const st = Object.fromEntries(all('SELECT status, COUNT(*) c FROM plots WHERE project_id=? GROUP BY status', pr.id).map((x) => [x.status, x.c]));
     const bk = get("SELECT COUNT(*) c, COALESCE(SUM(total),0) v, COALESCE(SUM(discount),0) d, COALESCE(SUM(base_amount),0) bs FROM bookings WHERE project_id=? AND status<>'cancelled' AND booked_on>=? AND booked_on<?", pr.id, p.fromD, p.toD);
@@ -161,13 +179,16 @@ r.get('/api/export/:kind', { admin: true }, (ctx) => {
 
 // ================= SEARCH & AUDIT =================
 r.get('/api/search', (ctx) => {
-  const q = String(ctx.query.q || '').trim(); if (q.length < 2) return { leads: [], bookings: [], plots: [] };
+  const q = String(ctx.query.q || '').trim(); if (q.length < 2) return { leads: [], bookings: [], plots: [], projects: [], activities: [] };
   const t = `%${q}%`, digits = q.replace(/\D/g, '');
   const sl = scope(ctx, 'l.assigned_to'), sb = scope(ctx, 'b.sold_by');
   return {
-    leads: all(`SELECT l.id,l.name,l.phone_norm,l.stage FROM leads l WHERE l.org_id=? AND (l.name LIKE ? OR l.email LIKE ? OR (?<>'' AND l.phone_norm LIKE ?))${sl.sql} ORDER BY l.updated_at DESC LIMIT 6`, ctx.oid, t, t, digits.length > 2 ? digits : '', `%${digits}%`, ...sl.args),
-    bookings: all(`SELECT b.id,b.booking_no,b.buyer_name FROM bookings b WHERE b.org_id=? AND (b.booking_no LIKE ? OR b.buyer_name LIKE ?)${sb.sql} LIMIT 5`, ctx.oid, t, t, ...sb.args),
+    leads: all(`SELECT l.id,l.name,l.phone_norm,l.stage,u.name AS rep_name FROM leads l LEFT JOIN users u ON u.id=l.assigned_to WHERE l.org_id=? AND (l.name LIKE ? OR l.email LIKE ? OR l.notes LIKE ? OR (?<>'' AND l.phone_norm LIKE ?))${sl.sql} ORDER BY (l.name LIKE ?) DESC, l.updated_at DESC LIMIT 8`,
+      ctx.oid, t, t, t, digits.length > 2 ? digits : '', `%${digits}%`, `${q}%`, ...sl.args),
+    bookings: all(`SELECT b.id,b.booking_no,b.buyer_name FROM bookings b WHERE b.org_id=? AND (b.booking_no LIKE ? OR b.buyer_name LIKE ? OR (?<>'' AND b.buyer_phone LIKE ?))${sb.sql} LIMIT 5`, ctx.oid, t, t, digits.length > 2 ? digits : '', `%${digits}%`, ...sb.args),
+    projects: all("SELECT id,name,location,city FROM projects WHERE org_id=? AND (name LIKE ? OR location LIKE ? OR city LIKE ? OR rera_no LIKE ?) ORDER BY (name LIKE ?) DESC LIMIT 5", ctx.oid, t, t, t, t, `${q}%`),
     plots: all('SELECT pl.id,pl.plot_no,pl.status,pr.name AS project_name,pr.id AS project_id FROM plots pl JOIN projects pr ON pr.id=pl.project_id WHERE pl.org_id=? AND pl.plot_no LIKE ? LIMIT 5', ctx.oid, t),
+    activities: all(`SELECT a.id,a.type,a.content,a.lead_id,l.name AS lead_name FROM activities a JOIN leads l ON l.id=a.lead_id WHERE a.org_id=? AND a.type IN ('note','call','whatsapp','visit') AND a.content LIKE ?${sl.sql} ORDER BY a.id DESC LIMIT 5`, ctx.oid, t, ...sl.args),
   };
 });
 r.get('/api/audit', { admin: true }, (ctx) => all('SELECT a.*, u.name AS user_name FROM audit_log a LEFT JOIN users u ON u.id=a.user_id WHERE a.org_id=? ORDER BY a.id DESC LIMIT 300', ctx.oid));
@@ -288,7 +309,7 @@ async function callClaude(ctx, msg, lead, history) {
     return { reply: (j.content || []).map((c) => c.text || '').join('').trim() || 'I could not produce an answer.' };
   } catch (e) { return { reply: 'I could not reach the AI service right now. Local CRM commands still work (e.g. "distribute 10 leads to <name>", "hot leads", "pipeline summary").' }; }
 }
-r.post('/api/ai/chat', async (ctx) => {
+r.post('/api/ai/chat', { admin: true }, async (ctx) => {
   const msg = str(ctx.body.message); if (!msg) throw bad('Type a message');
   if (msg.length > 2000) throw bad('Message is too long');
   let lead = null;
@@ -303,5 +324,5 @@ r.post('/api/ai/chat', async (ctx) => {
   run('INSERT INTO ai_messages(org_id,user_id,role,content,at) VALUES (?,?,?,?,?)', ctx.oid, ctx.user.id, 'assistant', out.reply, now());
   return out;
 });
-r.get('/api/ai/history', (ctx) => all('SELECT role,content,at FROM ai_messages WHERE org_id=? AND user_id=? ORDER BY id DESC LIMIT 40', ctx.oid, ctx.user.id).reverse());
-r.del('/api/ai/history', (ctx) => { run('DELETE FROM ai_messages WHERE org_id=? AND user_id=?', ctx.oid, ctx.user.id); return { ok: true }; });
+r.get('/api/ai/history', { admin: true }, (ctx) => all('SELECT role,content,at FROM ai_messages WHERE org_id=? AND user_id=? ORDER BY id DESC LIMIT 40', ctx.oid, ctx.user.id).reverse());
+r.del('/api/ai/history', { admin: true }, (ctx) => { run('DELETE FROM ai_messages WHERE org_id=? AND user_id=?', ctx.oid, ctx.user.id); return { ok: true }; });

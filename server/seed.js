@@ -88,8 +88,8 @@ const pick = (a, i) => a[i % a.length];
   }
   // holds & a discount request
   await call('POST', `/plots/${plots1[8].id}/hold`, { lead_id: leadIds[2], hours: 48 }, A);
-  const rl = leadIds[4]; const RT = repToken(rl);
-  if (RT) await call('POST', '/discounts', { lead_id: rl, plot_id: plots1[10].id, amount: 90000, reason: 'Customer ready to book this week if we match a competitor offer' }, RT);
+  // an admin-recorded discount request waiting for approval (reps cannot request discounts)
+  await call('POST', '/discounts', { lead_id: leadIds[4], plot_id: plots1[10].id, amount: 90000, reason: 'Customer ready to book this week if we match a competitor offer' }, A);
   // attendance for a rep
   await call('POST', '/attendance/clock-in', { lat: 17.4487, lng: 78.3909 }, tokens['ravi@demo.test']).catch(() => {});
   // a suspicious repeat enquirer

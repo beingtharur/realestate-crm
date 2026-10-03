@@ -170,6 +170,47 @@ CREATE TABLE IF NOT EXISTS ai_messages (
 );
 `);
 
+// Schema changes after go-live: append a function here (never edit or reorder existing ones).
+// Each runs once per database, tracked with SQLite's PRAGMA user_version. Example:
+//   (d) => d.exec("ALTER TABLE leads ADD COLUMN alt_phone TEXT"),
+// New tables can simply be added to the CREATE TABLE IF NOT EXISTS block above.
+const MIGRATIONS = [
+  // 1: phone call-log id of a call reported by the Android companion app (prevents logging the same call twice)
+  (d) => d.exec("ALTER TABLE activities ADD COLUMN ext_id TEXT; CREATE UNIQUE INDEX IF NOT EXISTS ux_act_ext ON activities(org_id, user_id, ext_id) WHERE ext_id IS NOT NULL;"),
+  // 2: organization logo (small data URL)
+  (d) => d.exec("ALTER TABLE orgs ADD COLUMN logo TEXT"),
+  // 3: phone alerts, rep availability, escalation, visit lifecycle, re-enquiries, stage templates
+  (d) => d.exec(`
+    ALTER TABLE users ADD COLUMN availability TEXT NOT NULL DEFAULT 'available';
+    ALTER TABLE users ADD COLUMN unavailable_until TEXT;
+    ALTER TABLE users ADD COLUMN work_start TEXT;
+    ALTER TABLE users ADD COLUMN work_end TEXT;
+    ALTER TABLE users ADD COLUMN work_days TEXT;
+    ALTER TABLE users ADD COLUMN notif_prefs TEXT NOT NULL DEFAULT '{}';
+    ALTER TABLE users ADD COLUMN last_briefing TEXT;
+    ALTER TABLE notifications ADD COLUMN kind TEXT;
+    ALTER TABLE notifications ADD COLUMN action_url TEXT;
+    ALTER TABLE notifications ADD COLUMN action_label TEXT;
+    ALTER TABLE leads ADD COLUMN assigned_at TEXT;
+    ALTER TABLE leads ADD COLUMN esc_level INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE leads ADD COLUMN reenquiry_at TEXT;
+    ALTER TABLE leads ADD COLUMN reenquiry_count INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE tasks ADD COLUMN pre_reminded TEXT;
+    ALTER TABLE visits ADD COLUMN on_way_at TEXT;
+    ALTER TABLE visits ADD COLUMN rem_day TEXT;
+    ALTER TABLE visits ADD COLUMN rem_30 TEXT;
+    ALTER TABLE visits ADD COLUMN rem_late TEXT;
+    ALTER TABLE visits ADD COLUMN rem_out TEXT;
+    ALTER TABLE templates ADD COLUMN stage TEXT;
+    ALTER TABLE templates ADD COLUMN link TEXT;
+    UPDATE leads SET assigned_at=COALESCE(created_at, updated_at) WHERE assigned_to IS NOT NULL;
+  `),
+];
+for (let v = db.prepare('PRAGMA user_version').get().user_version; v < MIGRATIONS.length; v++) {
+  MIGRATIONS[v](db);
+  db.exec(`PRAGMA user_version=${v + 1}`);
+}
+
 const norm = (a) => a.map((v) => (v === undefined ? null : v === true ? 1 : v === false ? 0 : v !== null && typeof v === 'object' ? JSON.stringify(v) : v));
 const cache = new Map();
 function prep(sql) {

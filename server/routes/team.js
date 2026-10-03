@@ -8,7 +8,7 @@ const FREE_PLAN_REPS = 15;
 const activeRepCount = (oid) => get("SELECT COUNT(*) c FROM users WHERE org_id=? AND role='rep' AND status='active'", oid).c;
 const pendingRepInvites = (oid) => get("SELECT COUNT(*) c FROM invites WHERE org_id=? AND role='rep' AND used_at IS NULL AND expires_at>?", oid, now()).c;
 function member(oid, id) { const u = get('SELECT * FROM users WHERE id=? AND org_id=?', id, oid); if (!u) throw notFound('Team member not found'); return u; }
-const slim = ({ password_hash, failed_attempts, locked_until, ...u }) => u;
+const slim = ({ password_hash, failed_attempts, locked_until, notif_prefs, last_briefing, ...u }) => u;
 
 function performance(oid, uid, range = 'month') {
   const p = period(range);
@@ -126,8 +126,9 @@ r.get('/api/team/:id/profile', (ctx) => {
   const u = member(ctx.oid, id);
   const sessions = all('SELECT id,device,ip,created_at,last_seen,ended_at FROM sessions WHERE user_id=? ORDER BY id DESC LIMIT 15', id)
     .map((s) => ({ ...s, online: !s.ended_at && Date.now() - Date.parse(s.last_seen) < 180000 }));
+  const strip = (p) => { if (!ctx.isAdmin) delete p.collected; return p; };
   return {
-    user: slim(u), health: L.repHealth(ctx.oid, u), perf: performance(ctx.oid, id), perf_all: performance(ctx.oid, id, 'all'),
+    user: slim(u), health: L.repHealth(ctx.oid, u), perf: strip(performance(ctx.oid, id)), perf_all: strip(performance(ctx.oid, id, 'all')),
     sessions, attendance: all('SELECT * FROM attendance WHERE user_id=? ORDER BY date DESC LIMIT 30', id),
   };
 });

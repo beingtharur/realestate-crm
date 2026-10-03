@@ -3,6 +3,7 @@ const fs = require('fs');
 const { r } = require('../router');
 const { all, get, run, tx } = require('../db');
 const L = require('../lib');
+const { readTable } = require('../files');
 const { HttpError, bad, forbidden, notFound, now, str, num, newToken, addMs } = L;
 
 function leadFor(ctx, id) {
@@ -13,6 +14,7 @@ function leadFor(ctx, id) {
 const parseLead = (l) => ({ ...l, custom: JSON.parse(l.custom || '{}') });
 const LIST_SQL = `SELECT l.*, u.name AS rep_name, pr.name AS project_name, pa.name AS partner_name,
   (SELECT MIN(due_at) FROM tasks t WHERE t.lead_id=l.id AND t.status='open') AS next_due,
+  (SELECT MAX(a.created_at) FROM activities a WHERE a.lead_id=l.id AND a.type IN ('call','whatsapp') AND COALESCE(a.outcome,'')<>'Initiated') AS last_contacted,
   (SELECT COUNT(*) FROM bookings b WHERE b.lead_id=l.id AND b.status<>'cancelled') AS booking_count
   FROM leads l LEFT JOIN users u ON u.id=l.assigned_to LEFT JOIN projects pr ON pr.id=l.pref_project_id LEFT JOIN partners pa ON pa.id=l.partner_id WHERE l.org_id=?`;
 
@@ -29,13 +31,39 @@ r.get('/api/leads', (ctx) => {
   if (q.flag === 'pending') sql += " AND l.flag_status IN ('pending','spam')";
   if (q.dup === 'reported') sql += " AND l.dup_status='reported'";
   if (q.open === '1') sql += " AND l.stage NOT IN ('Booked','Lost')";
+  if (q.uncontacted === '1') sql += " AND l.stage='New' AND l.last_activity_at IS NULL AND l.flag_status<>'spam'";
+  if (q.cooling === '1') { sql += " AND l.rating='Hot' AND l.stage NOT IN ('Booked','Lost') AND COALESCE(l.last_activity_at,l.created_at)<?"; a.push(L.addMs(-48 * 3600e3)); }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(q.from || '')) { sql += ' AND l.created_at>=?'; a.push(L.dayRange(q.from).from); }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(q.to || '')) { sql += ' AND l.created_at<?'; a.push(L.dayRange(q.to).to); }
   if (q.q) {
     const t = `%${String(q.q).trim()}%`, digits = `%${String(q.q).replace(/\D/g, '')}%`;
     sql += ' AND (l.name LIKE ? OR l.email LIKE ? OR l.phone_norm LIKE ?)'; a.push(t, t, digits.length > 2 ? digits : '%__none__%');
   }
   sql += q.stage === 'Lost' ? ' ORDER BY l.lost_at DESC' : ' ORDER BY l.updated_at DESC';
   sql += ' LIMIT ?'; a.push(Math.min(Number(q.limit) || 1000, 3000));
-  return all(sql, ...a).map(parseLead);
+  let rows = all(sql, ...a).map(parseLead);
+  if (q.followup) { // overdue | today | upcoming | none — based on the lead's earliest open follow-up
+    const now = Date.now(), eod = Date.parse(L.dayRange(L.istDate()).to);
+    rows = rows.filter((l) => (q.followup === 'none' ? !l.next_due : l.next_due && (q.followup === 'overdue' ? Date.parse(l.next_due) < now : q.followup === 'today' ? Date.parse(l.next_due) >= now && Date.parse(l.next_due) < eod : Date.parse(l.next_due) >= eod)));
+  }
+  return rows;
+});
+/** Change the stage of many leads at once. Reps can only touch their own leads. "Booked" still needs a booking. */
+r.post('/api/leads/bulk-stage', (ctx) => {
+  const ids = (ctx.body.ids || []).map(Number).filter(Boolean).slice(0, 500), stage = ctx.body.stage;
+  if (!ids.length) throw bad('Select at least one lead');
+  if (!L.STAGES.includes(stage)) throw bad('Choose a stage');
+  if (stage === 'Booked') throw bad('Leads become "Booked" by creating a booking.');
+  if (stage === 'Lost' && !L.LOST_REASONS.includes(ctx.body.lost_reason)) throw bad('Choose a lost reason');
+  let updated = 0; const skipped = [];
+  tx(() => ids.forEach((id) => {
+    const l = get('SELECT * FROM leads WHERE id=? AND org_id=?', id, ctx.oid);
+    if (!l || (!ctx.isAdmin && l.assigned_to !== ctx.user.id)) return skipped.push({ id, reason: 'Not your lead' });
+    if (l.stage === 'Booked') return skipped.push({ id, name: l.name, reason: 'Already booked' });
+    if (l.stage === stage) return;
+    L.setStage(ctx.oid, id, stage, ctx.user, { lost_reason: ctx.body.lost_reason, lost_note: ctx.body.lost_note }); updated++;
+  }));
+  return { updated, skipped };
 });
 
 r.post('/api/leads/check-duplicate', (ctx) => {
@@ -59,7 +87,7 @@ r.get('/api/leads/:id', (ctx) => {
   const timeline = all(`SELECT a.*, u.name AS user_name FROM activities a LEFT JOIN users u ON u.id=a.user_id WHERE a.org_id=? AND a.lead_id=? ORDER BY a.created_at DESC, a.id DESC LIMIT 300`, ctx.oid, l.id)
     .map((x) => ({ ...x, meta: x.meta ? JSON.parse(x.meta) : null }));
   const bookings = all(`SELECT b.*, pl.plot_no, pr.name AS project_name FROM bookings b JOIN plots pl ON pl.id=b.plot_id JOIN projects pr ON pr.id=b.project_id WHERE b.org_id=? AND b.lead_id=? ORDER BY b.id DESC`, ctx.oid, l.id)
-    .map((b) => ({ ...b, ...L.bookingSummary(ctx.oid, b.id) }));
+    .map((b) => (ctx.isAdmin ? { ...b, ...L.bookingSummary(ctx.oid, b.id) } : { id: b.id, booking_no: b.booking_no, status: b.status, total: b.total - 0, plot_no: b.plot_no, project_name: b.project_name, booked_on: b.booked_on }));
   return {
     lead,
     duplicates: L.findDuplicates(ctx.oid, l.phone_norm, l.email, l.id).map((d) => ({ id: d.id, name: d.name, stage: d.stage, rep_name: d.rep_name })),
@@ -69,7 +97,8 @@ r.get('/api/leads/:id', (ctx) => {
     bookings,
     kyc: all('SELECT id,doc_type,filename,status,remark,uploaded_at FROM kyc_docs WHERE org_id=? AND lead_id=? ORDER BY id DESC', ctx.oid, l.id),
     holds: all("SELECT pl.id, pl.plot_no, pl.hold_until, pr.name AS project_name FROM plots pl JOIN projects pr ON pr.id=pl.project_id WHERE pl.org_id=? AND pl.hold_lead_id=? AND pl.status='hold'", ctx.oid, l.id),
-    discounts: all('SELECT d.*, pl.plot_no FROM discount_requests d JOIN plots pl ON pl.id=d.plot_id WHERE d.org_id=? AND d.lead_id=? ORDER BY d.id DESC', ctx.oid, l.id),
+    discounts: ctx.isAdmin ? all('SELECT d.*, pl.plot_no FROM discount_requests d JOIN plots pl ON pl.id=d.plot_id WHERE d.org_id=? AND d.lead_id=? ORDER BY d.id DESC', ctx.oid, l.id) : [],
+    next_action: require('../nba').nextAction(ctx.oid, l),
     portal_status: !l.portal_token ? 'Pending Portal Link' : l.portal_expires < now() ? 'Portal Link Expired' : 'Portal Link Sent',
   };
 });
@@ -200,75 +229,188 @@ r.post('/api/filters', (ctx) => {
 });
 r.del('/api/filters/:id', (ctx) => { run('DELETE FROM saved_filters WHERE id=? AND user_id=?', ctx.params.id, ctx.user.id); return { ok: true }; });
 
-// ----- bulk import (admin) -----
+// ----- bulk import (admin): CSV / .xlsx / .xls / PDF → map columns → preview → commit -----
 const ALIASES = {
-  name: ['name', 'full_name', 'fullname', 'customer', 'customer_name', 'lead_name', 'client', 'client_name'],
-  phone: ['phone', 'mobile', 'mobile_no', 'mobile_number', 'phone_number', 'contact', 'contact_no', 'contact_number', 'whatsapp', 'cell'],
-  email: ['email', 'email_id', 'e_mail', 'mail'],
+  name: ['name', 'full_name', 'fullname', 'customer', 'customer_name', 'lead_name', 'client', 'client_name', 'contact_name', 'contact_person'],
+  phone: ['phone', 'mobile', 'mobile_no', 'mobile_number', 'phone_number', 'phone_no', 'contact', 'contact_no', 'contact_number', 'whatsapp', 'whatsapp_no', 'cell', 'number', 'mob', 'mob_no'],
+  email: ['email', 'email_id', 'e_mail', 'mail', 'email_address'],
   source: ['source', 'lead_source', 'channel'],
   budget_min: ['budget_min', 'min_budget'],
   budget_max: ['budget_max', 'max_budget', 'budget'],
   pref_size: ['size', 'plot_size', 'preferred_size', 'area', 'sq_yd', 'sqyd', 'sq_yards'],
   pref_facing: ['facing', 'preferred_facing'],
-  pref_location: ['location', 'preferred_location', 'area_preference'],
+  pref_location: ['location', 'preferred_location', 'area_preference', 'city', 'locality'],
   project: ['project', 'preferred_project', 'project_name', 'layout'],
   purpose: ['purpose', 'buying_purpose'],
-  notes: ['notes', 'note', 'remarks', 'comment', 'comments', 'requirement'],
-  rep: ['rep', 'assigned_to', 'assigned', 'owner', 'sales_rep'],
+  notes: ['notes', 'note', 'remarks', 'remark', 'comment', 'comments', 'requirement', 'message'],
+  rep: ['rep', 'assigned_to', 'assigned', 'owner', 'sales_rep', 'executive'],
 };
-function readRows(body) {
-  if (body.file_base64) {
-    const buf = Buffer.from(body.file_base64, 'base64');
-    return /\.xlsx$/i.test(body.filename || '') ? L.parseXlsx(buf) : L.parseCsv(buf.toString('utf8'));
+const FIELD_LABELS = { name: 'Name', phone: 'Phone', email: 'Email', source: 'Source', budget_min: 'Budget (min)', budget_max: 'Budget (max)', pref_size: 'Plot size (sq.yd)',
+  pref_facing: 'Facing', pref_location: 'Location', project: 'Project', purpose: 'Purpose', notes: 'Notes', rep: 'Assigned rep' };
+const FACINGS = ['East', 'West', 'North', 'South', 'North-East', 'North-West', 'South-East', 'South-West'];
+const slug = (h) => String(h).trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+const squash = (v) => String(v).toLowerCase().replace(/[^a-z0-9]/g, '');
+
+// --- value normalisers ---
+/** First valid Indian mobile in a cell — cells often hold "98765 43210 / 98450 12345", "Ph: +91-98765-43210" or "9876543210.0". */
+function pickPhone(v) {
+  const whole = L.normPhone(v);
+  if (whole) return whole;
+  for (const m of String(v).replace(/(\d)\.0+(?!\d)/g, '$1').match(/(?:\+?91[\s-]?|0)?[6-9](?:[\s-]?\d){9}(?!\d)/g) || []) { const p = L.normPhone(m); if (p) return p; }
+  return null;
+}
+/** Spreadsheet exports are full of placeholders for "nothing here" — treat them all as blank. */
+const NULLISH = /^(null|nil|none|n\/?a|na|nan|undefined|not available|not provided|unknown|tbd|\?+|-+|—+|–+|\.+|\/+|0)$/i;
+const blank = (v) => { const t = String(v ?? '').replace(/\s+/g, ' ').trim(); return NULLISH.test(t) ? '' : t; };
+/** "35 L", "1.2 cr", "₹35,00,000", "30-40 lakhs" → [min, max] in rupees (either may be null). */
+function moneyRange(v) {
+  const text = String(v).toLowerCase().replace(/[₹,]|rs\.?|inr/g, ' ');
+  const unit = /cr/.test(text) ? 1e7 : /(^|[\d\s])(l|lac|lacs|lakh|lakhs)\b/.test(text) ? 1e5 : /(^|[\d\s])k\b|thousand/.test(text) ? 1e3 : 1;
+  const nums = (text.match(/\d+(?:\.\d+)?/g) || []).map((n) => Math.round(Number(n) * unit)).filter((n) => n > 0);
+  return nums.length >= 2 ? [Math.min(nums[0], nums[1]), Math.max(nums[0], nums[1])] : nums.length ? [null, nums[0]] : [null, null];
+}
+function sizeRange(v) {
+  const nums = (String(v).replace(/,/g, '').match(/\d+(?:\.\d+)?/g) || []).map(Number).filter((n) => n > 0);
+  return nums.length >= 2 ? [Math.min(nums[0], nums[1]), Math.max(nums[0], nums[1])] : nums.length ? [nums[0], nums[0]] : [null, null];
+}
+const canon = (list, v) => list.find((x) => squash(x) === squash(v)) || null;
+
+// Parsed uploads are kept briefly so the user can change the column mapping without uploading again.
+const uploads = new Map();
+function remember(entry) {
+  for (const [k, u] of uploads) if (Date.now() - u.at > 30 * 60000) uploads.delete(k);
+  if (uploads.size >= 30) uploads.delete(uploads.keys().next().value);
+  const id = newToken(8); uploads.set(id, { ...entry, at: Date.now() }); return id;
+}
+// Looser header matching for headers that are not in ALIASES ("Mob. No.", "Client Details", "Enquiry From"…).
+// Tried in this order; a column is only claimed once.
+const FUZZY = [
+  ['phone', /(phone|mobile|\bmob\b|whats?app|contact ?(no|num)|\bcell\b|\btel\b|telephone|\bcontact\b|number|\bno\b\.?$)/, /(plot|s\.? ?no|sr\.? ?no|serial|row|\bid\b|alt|alternate|secondary|landline|office)/],
+  ['email', /(e-?mail|mail ?id)/],
+  ['source', /(source|channel|medium|campaign|enquiry (from|via)|inquiry (from|via)|referr|how did)/],
+  ['project', /(project|layout|venture|scheme)/],
+  ['rep', /(\brep\b|assigned|owner|executive|sales ?person|\bagent\b|handled by)/],
+  ['pref_facing', /(facing|direction)/],
+  ['pref_size', /(size|sq\.? ?y|yards?|\bgaj\b|plot area)/],
+  ['budget_max', /(budget|price|affordab|ticket)/],
+  ['purpose', /(purpose|buying for|intent)/],
+  ['pref_location', /(location|locality|town|city|place|\barea\b|address|region)/],
+  ['notes', /(note|remark|comment|requirement|message|query|additional (info|detail)|feedback|status)/],
+  ['name', /(name|customer|client|lead|person|party)/, /(project|rep\b|owner|source|assigned|company|father|spouse|alt)/],
+];
+const looksPhone = (v) => !!pickPhone(blank(v));
+const looksEmail = (v) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(blank(v));
+const looksName = (v) => { const t = blank(v); return t.length >= 2 && t.length <= 50 && !/\d{4,}/.test(t) && !t.includes('@') && (t.match(/[A-Za-zऀ-෿]/g) || []).length / t.length > 0.6; };
+function autoMap(heads, cfs, table = []) {
+  const keys = heads.map(slug), map = {}, used = new Set();
+  const claim = (k, i) => { if (i >= 0 && !used.has(i) && !(k in map)) { map[k] = i; used.add(i); } };
+  for (const [k, names] of Object.entries(ALIASES)) claim(k, keys.findIndex((h, i) => names.includes(h) && !used.has(i)));
+  for (const f of cfs) claim('cf_' + f.id, keys.findIndex((h, i) => h === slug(f.label) && !used.has(i)));
+  for (const [k, re, not] of FUZZY) {
+    if (k in map) continue;
+    claim(k, heads.findIndex((h, i) => !used.has(i) && re.test(String(h).toLowerCase()) && !(not && not.test(String(h).toLowerCase()))));
   }
-  return body.rows || [];
+  // Still nothing? Look at what the columns actually contain.
+  const sample = table.slice(1, 120).filter((r) => r.some(Boolean));
+  const share = (i, test) => { const vals = sample.map((r) => blank(r[i])).filter(Boolean); return vals.length ? vals.filter(test).length / vals.length : 0; };
+  const cols = heads.map((_, i) => i).filter((i) => !used.has(i));
+  if (!('phone' in map)) claim('phone', cols.map((i) => [i, share(i, looksPhone)]).filter(([, p]) => p >= 0.5).sort((a, b) => b[1] - a[1])[0]?.[0] ?? -1);
+  if (!('email' in map)) claim('email', cols.map((i) => [i, share(i, looksEmail)]).filter(([, p]) => p >= 0.5).sort((a, b) => b[1] - a[1])[0]?.[0] ?? -1);
+  if (!('source' in map)) claim('source', cols.map((i) => [i, share(i, (v) => !!canon(L.SOURCES, v) && v.toLowerCase() !== 'other')]).filter(([, p]) => p >= 0.5).sort((x, y) => y[1] - x[1])[0]?.[0] ?? -1);
+  if (!('name' in map)) claim('name', cols.find((i) => !used.has(i) && share(i, looksName) >= 0.7) ?? -1);
+  return map;
 }
-function importRows(oid, body) {
-  const rows = readRows(body);
-  if (rows.length < 2) throw bad('The file has no data rows');
-  const heads = rows[0].map((h) => String(h).trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, ''));
+/** Turn the raw table into normalised lead rows, each marked valid / duplicate / invalid. Missing optional values are fine. */
+function analyse(oid, table, mapping, defSource, offset = 0, extras = true) {
   const cfs = all('SELECT * FROM custom_fields WHERE org_id=?', oid);
-  const col = {};
-  for (const [k, names] of Object.entries(ALIASES)) col[k] = heads.findIndex((h) => names.includes(h));
-  const cfCol = cfs.map((f) => ({ f, ix: heads.indexOf(f.label.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '')) })).filter((x) => x.ix >= 0);
-  if (col.name < 0 || col.phone < 0) throw bad('The file needs "name" and "phone" columns');
   const projects = all('SELECT id,name FROM projects WHERE org_id=?', oid), users = all("SELECT id,name,email FROM users WHERE org_id=? AND status='active'", oid);
-  const seen = new Map(); const out = [];
-  rows.slice(1).forEach((row, i) => {
-    if (!row.some((c) => String(c ?? '').trim())) return;
-    const g = (k) => (col[k] >= 0 ? String(row[col[k]] ?? '').trim() : '');
-    const d = { name: g('name'), phone: g('phone'), email: g('email'), source: g('source'), notes: g('notes'), pref_facing: g('pref_facing'), pref_location: g('pref_location'), purpose: g('purpose') };
-    d.budget_min = num(g('budget_min').replace(/,/g, '')); d.budget_max = num(g('budget_max').replace(/,/g, ''));
-    const sz = num(g('pref_size').replace(/,/g, '')); if (sz) { d.pref_size_min = sz; d.pref_size_max = sz; }
-    const pj = projects.find((p) => p.name.toLowerCase() === g('project').toLowerCase()); if (pj) d.pref_project_id = pj.id;
+  const heads = table[0], mapped = new Set(Object.values(mapping));
+  const seenPhone = new Map(), seenEmail = new Map(), out = [];
+  table.slice(1).forEach((row, i) => {
+    if (!row.some((c) => blank(c))) return; // empty or placeholder-only row
+    const g = (k) => (mapping[k] !== undefined ? blank(row[mapping[k]]) : '');
+    const warnings = [];
+    const d = { name: g('name'), phone: g('phone'), email: g('email').toLowerCase(), notes: g('notes'), pref_location: g('pref_location'), purpose: g('purpose') };
+    d.source = canon(L.SOURCES, g('source')) || g('source') || defSource;
+    d.pref_facing = canon(FACINGS, g('pref_facing')) || '';
+    const [bMin, bMax] = moneyRange(g('budget_max')); d.budget_max = bMax; d.budget_min = moneyRange(g('budget_min'))[1] ?? bMin;
+    const [sMin, sMax] = sizeRange(g('pref_size')); if (sMin) { d.pref_size_min = sMin; d.pref_size_max = sMax; }
+    const pj = g('project') && projects.find((p) => squash(p.name) === squash(g('project'))); if (pj) d.pref_project_id = pj.id;
     const rp = g('rep').toLowerCase(); if (rp) { const u = users.find((x) => x.email.toLowerCase() === rp || x.name.toLowerCase() === rp); if (u) d.assigned_to = u.id; }
-    if (cfCol.length) { d.custom = {}; cfCol.forEach(({ f, ix }) => { const v = String(row[ix] ?? '').trim(); if (v) d.custom[f.id] = f.type === 'checkbox' ? /^(y|yes|true|1)$/i.test(v) : v; }); }
-    const errs = [];
-    if (!d.name) errs.push('Name is missing');
-    const pn = L.normPhone(d.phone);
-    if (!pn) errs.push('Invalid phone number');
-    if (d.email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(d.email)) errs.push('Invalid email');
-    let dup = null;
-    if (pn) {
-      if (seen.has(pn)) errs.push(`Duplicate of row ${seen.get(pn)} in this file`);
-      else {
-        seen.set(pn, i + 2);
-        const ex = L.findDuplicates(oid, pn, d.email);
-        if (ex.length) { errs.push(`Already exists as "${ex[0].name}" (${ex[0].stage})`); dup = ex[0].id; }
-      }
+    const custom = {}; cfs.forEach((f) => { const v = g('cf_' + f.id); if (v) custom[f.id] = f.type === 'checkbox' ? /^(y|yes|true|1)$/i.test(v) : v; });
+    if (Object.keys(custom).length) d.custom = custom;
+    // phone: the mapped cell first, then any other cell in the row that holds a mobile number
+    let pn = pickPhone(d.phone);
+    if (!pn) {
+      const typed = new Set(['budget_min', 'budget_max', 'pref_size', 'project', 'rep'].map((k) => mapping[k]).concat(Object.entries(mapping).filter(([k]) => k.startsWith('cf_')).map(([, v]) => v)));
+      const alt = row.findIndex((c, k) => k !== mapping.phone && !typed.has(k) && looksPhone(c));
+      if (alt >= 0) { pn = pickPhone(blank(row[alt])); warnings.push(`Phone taken from "${heads[alt] || 'column ' + (alt + 1)}"`); }
     }
-    out.push({ row: i + 2, data: d, status: errs.length ? 'error' : 'valid', errors: errs, dup_of: dup });
+    if (!d.email) { const alt = row.findIndex((c, k) => !mapped.has(k) && looksEmail(c)); if (alt >= 0) d.email = blank(row[alt]).toLowerCase(); }
+    if (extras) { // columns we could not map are kept as notes instead of being thrown away
+      const more = row.map((c, k) => (mapped.has(k) || !blank(c) ? '' : `${heads[k] && !/^Column \d+$/.test(heads[k]) ? heads[k] : 'Info'}: ${blank(c)}`)).filter(Boolean);
+      if (more.length) d.notes = [d.notes, ...more].filter(Boolean).join(' · ').slice(0, 1000);
+    }
+    const invalid = [];
+    if (!pn) invalid.push(blank(row[mapping.phone]) ? 'No valid mobile number' : d.phone ? 'Invalid phone number' : 'Phone is missing');
+    if (d.email && pickPhone(d.email) === pn) d.email = ''; // a phone number that landed in the email column
+    if (d.email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(d.email)) { warnings.push(`Email "${d.email}" is not valid and was left out`); d.email = ''; }
+    if (!d.name && pn) { d.name = d.email ? d.email.split('@')[0].replace(/[._\-\d]+/g, ' ').trim().replace(/\b\w/g, (c) => c.toUpperCase()) || `Lead ${pn.slice(-4)}` : `Lead ${pn.slice(-4)}`; warnings.push(`No name — saved as "${d.name}"`); }
+    let status = 'valid', reasons = invalid, dup_of = null;
+    if (invalid.length) status = 'invalid';
+    else {
+      const inFile = seenPhone.get(pn) || (d.email && seenEmail.get(d.email));
+      if (inFile) { status = 'duplicate'; reasons = [`Same ${seenPhone.has(pn) ? 'phone' : 'email'} as row ${inFile} in this file`]; }
+      else {
+        const ex = L.findDuplicates(oid, pn, d.email);
+        if (ex.length) { status = 'duplicate'; dup_of = ex[0].id; reasons = [`Already in CRM as "${ex[0].name}" (${ex[0].stage}${ex[0].rep_name ? ', ' + ex[0].rep_name : ''})`]; }
+      }
+      if (!seenPhone.has(pn)) seenPhone.set(pn, i + 2 + offset);
+      if (d.email && !seenEmail.has(d.email)) seenEmail.set(d.email, i + 2 + offset);
+      d.phone = pn;
+    }
+    out.push({ row: i + 2 + offset, data: d, status, errors: reasons, warnings: status === 'valid' ? warnings : [], dup_of });
   });
-  return { headers: rows[0], rows: out };
+  return out;
 }
-r.post('/api/leads/import/preview', { admin: true }, (ctx) => {
-  const { headers, rows } = importRows(ctx.oid, ctx.body);
-  const def = str(ctx.body.default_source) || 'Other';
-  rows.forEach((x) => { if (!x.data.source) x.data.source = def; });
-  return { headers, rows, total: rows.length, valid: rows.filter((x) => x.status === 'valid').length, errors: rows.filter((x) => x.status === 'error').length };
+r.post('/api/leads/import/preview', { admin: true }, async (ctx) => {
+  const b = ctx.body;
+  let up = b.upload_id ? uploads.get(b.upload_id) : null;
+  if (b.upload_id && (!up || up.oid !== ctx.oid)) throw bad('This upload has expired. Please choose the file again.');
+  let id = b.upload_id;
+  if (!up) {
+    // file_base64 is the normal path; `rows` (already-parsed table) is kept for API clients
+    const parsed = b.file_base64 ? await readTable(Buffer.from(b.file_base64, 'base64'), b.filename) : { kind: 'rows', rows: b.rows || [], note: '' };
+    if (parsed.rows.length < 2) throw bad('The file has no data rows');
+    up = { oid: ctx.oid, table: parsed.rows, offset: parsed.offset || 0, kind: parsed.kind, note: parsed.note, filename: str(b.filename) || 'upload' };
+    id = remember(up);
+  }
+  const cfs = all('SELECT * FROM custom_fields WHERE org_id=? ORDER BY position,id', ctx.oid);
+  const heads = up.table[0];
+  const mapping = b.mapping && typeof b.mapping === 'object'
+    ? Object.fromEntries(Object.entries(b.mapping).filter(([k, v]) => (k in FIELD_LABELS || /^cf_\d+$/.test(k)) && Number.isInteger(v) && v >= 0 && v < heads.length))
+    : autoMap(heads, cfs, up.table);
+  if (mapping.phone === undefined) {
+    if (!b.mapping) { // could not recognise the headers — let the user map them
+      return { upload_id: id, filename: up.filename, kind: up.kind, note: up.note, needs_mapping: true, mapping, rows: [], total: 0, valid: 0, duplicates: 0, invalid: 0, to_import: 0,
+        columns: heads.map((h, i) => ({ index: i, header: h, samples: up.table.slice(1).filter((r) => r.some(Boolean)).slice(0, 3).map((r) => r[i] || '') })),
+        fields: [...Object.entries(FIELD_LABELS).map(([key, label]) => ({ key, label })), ...cfs.map((f) => ({ key: 'cf_' + f.id, label: f.label }))] };
+    }
+    throw bad('Choose which column holds the phone number');
+  }
+  const extras = b.include_extras !== false;
+  const rows = analyse(ctx.oid, up.table, mapping, str(b.default_source) || 'Other', up.offset, extras);
+  const n = (st) => rows.filter((x) => x.status === st).length;
+  return {
+    upload_id: id, filename: up.filename, kind: up.kind, note: up.note, needs_mapping: false, include_extras: extras, mapping, headers: heads, rows,
+    columns: heads.map((h, i) => ({ index: i, header: h, samples: up.table.slice(1).filter((r) => r.some(Boolean)).slice(0, 3).map((r) => r[i] || '') })),
+    fields: [...Object.entries(FIELD_LABELS).map(([key, label]) => ({ key, label })), ...cfs.map((f) => ({ key: 'cf_' + f.id, label: f.label }))],
+    total: rows.length, valid: n('valid'), duplicates: n('duplicate'), invalid: n('invalid'), to_import: n('valid'),
+  };
 });
 r.post('/api/leads/import/commit', { admin: true }, (ctx) => {
-  const items = Array.isArray(ctx.body.rows) ? ctx.body.rows : [];
+  // Only rows the preview marked valid are sent; each is still re-checked here, so a duplicate can never slip in.
+  const items = (Array.isArray(ctx.body.rows) ? ctx.body.rows : []).filter((it) => !it.status || it.status === 'valid');
   if (!items.length) throw bad('Nothing to import');
   let imported = 0; const skipped = []; const perRep = {};
   tx(() => items.forEach((it) => {
@@ -277,12 +419,13 @@ r.post('/api/leads/import/commit', { admin: true }, (ctx) => {
       if (created) { imported++; if (lead.assigned_to) perRep[lead.assigned_to] = (perRep[lead.assigned_to] || 0) + 1; }
     } catch (e) {
       if (!(e instanceof HttpError)) throw e;
-      skipped.push({ row: it.row, name: it.data?.name, reason: e.status === 409 ? `Already exists as "${e.extra.duplicates[0].name}"` : e.message });
+      skipped.push({ row: it.row, name: it.data?.name, reason: e.status === 409 ? `Already in CRM as "${e.extra.duplicates[0].name}"` : e.message });
     }
   }));
   for (const [uid, n] of Object.entries(perRep)) L.notify(ctx.oid, { user: Number(uid), title: `${n} new leads assigned`, message: `${n} imported lead(s) were assigned to you`, link: '#/leads' });
   L.notifyAdmins(ctx.oid, 'Lead import completed', `${imported} lead(s) imported, ${skipped.length} skipped`, '#/leads');
   L.audit(ctx.oid, ctx.user.id, 'lead.import', 'lead', null, `${imported} imported, ${skipped.length} skipped`);
+  if (ctx.body.upload_id) uploads.delete(ctx.body.upload_id);
   return { imported, skipped };
 });
 

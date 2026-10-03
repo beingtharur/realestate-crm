@@ -55,9 +55,12 @@ r.post('/api/bookings/preview', (ctx) => {
   const pl = get('SELECT * FROM plots WHERE id=? AND org_id=?', Number(b.plot_id), ctx.oid);
   if (!pl) throw bad('Choose a plot');
   const pr = get('SELECT * FROM projects WHERE id=?', pl.project_id);
+  if (!ctx.isAdmin && num(b.discount)) throw bad('Discounts can only be applied by an admin');
   const price = L.priceFor(pl, pr, num(b.discount) || 0);
   const token = round(b.token_amount);
-  return { price, plot: pl, project: { id: pr.id, name: pr.name }, token_amount: token, installments: buildPlan(price.total, b), discount_needs_approval: price.discount > price.max_discount };
+  const out = { price, plot: pl, project: { id: pr.id, name: pr.name }, token_amount: token, installments: buildPlan(price.total, b), discount_needs_approval: price.discount > price.max_discount };
+  if (!ctx.isAdmin) { delete price.max_discount; delete price.discount; delete out.discount_needs_approval; }
+  return out;
 });
 
 r.post('/api/bookings', (ctx) => {
@@ -72,11 +75,8 @@ r.post('/api/bookings', (ctx) => {
     if (!['available', 'hold'].includes(pl.status)) throw bad(`Plot ${pl.plot_no} is ${pl.status} and cannot be booked`);
     const pr = get('SELECT * FROM projects WHERE id=?', pl.project_id);
     const price = L.priceFor(pl, pr, num(b.discount) || 0);
-    let approvedReq = null;
-    if (price.discount > price.max_discount && !ctx.isAdmin) {
-      approvedReq = get("SELECT * FROM discount_requests WHERE org_id=? AND lead_id=? AND plot_id=? AND status='approved' AND used=0 AND amount>=? ORDER BY id DESC", ctx.oid, lead.id, pl.id, price.discount);
-      if (!approvedReq) throw bad(`Discount ${money(price.discount)} is above the allowed ${money(price.max_discount)} (${pr.max_discount_pct}%). Request approval from your admin first.`);
-    }
+    if (price.discount && !ctx.isAdmin) throw bad('Discounts can only be applied by an admin');
+    const approvedReq = ctx.isAdmin && price.discount ? get("SELECT * FROM discount_requests WHERE org_id=? AND lead_id=? AND plot_id=? AND status='approved' AND used=0 AND amount>=? ORDER BY id DESC", ctx.oid, lead.id, pl.id, price.discount) : null;
     const token = round(b.token_amount);
     if (token <= 0) throw bad('Enter the token / booking amount received');
     if (token > price.total) throw bad('Token amount cannot exceed the plot price');
@@ -111,7 +111,7 @@ r.post('/api/bookings', (ctx) => {
     }
     L.logActivity(ctx.oid, lead.id, ctx.user.id, 'booking', { content: `Booked Plot ${pl.plot_no} (${pr.name}) — ${money(price.total)}, token ${money(token)}. ${bookingNo}`, meta: { booking_id: bid } });
     L.setStage(ctx.oid, lead.id, 'Booked', ctx.user, { allowBooked: true });
-    if (price.discount > price.max_discount && ctx.isAdmin) L.audit(ctx.oid, ctx.user.id, 'booking.discount_override', 'booking', bid, `${money(price.discount)} above limit ${money(price.max_discount)}`);
+    if (price.discount > price.max_discount) L.audit(ctx.oid, ctx.user.id, 'booking.discount_override', 'booking', bid, `${money(price.discount)} above limit ${money(price.max_discount)}`);
     L.notifyAdmins(ctx.oid, 'New booking 🎉', `${lead.name} booked Plot ${pl.plot_no} in ${pr.name} — ${money(price.total)} (${bookingNo})`, `#/bookings/${bid}`);
     if (soldBy !== ctx.user.id) L.notify(ctx.oid, { user: soldBy, title: 'Booking created on your lead', message: `${lead.name} — Plot ${pl.plot_no}, ${money(price.total)}`, link: `#/bookings/${bid}` });
     L.audit(ctx.oid, ctx.user.id, 'booking.create', 'booking', bid, bookingNo);
@@ -124,6 +124,11 @@ const BOOKING_LIST = `SELECT b.*, l.name AS lead_name, l.phone_norm AS lead_phon
   (SELECT COALESCE(SUM(amount),0) FROM payments p WHERE p.booking_id=b.id AND p.kind='receipt' AND p.voided=0) AS paid,
   (SELECT COALESCE(SUM(i.amount-i.paid_amount),0) FROM installments i WHERE i.booking_id=b.id AND i.due_date < ? AND i.paid_amount < i.amount-0.5 AND b.status<>'cancelled') AS overdue_amount
   FROM bookings b JOIN leads l ON l.id=b.lead_id JOIN plots pl ON pl.id=b.plot_id JOIN projects pr ON pr.id=b.project_id LEFT JOIN users u ON u.id=b.sold_by WHERE b.org_id=?`;
+/** What a representative may see of a booking: the sale itself, never money collected, dues, discount or commission. */
+function salesView(b) {
+  const { paid, outstanding, overdue_amount, discount, token_amount, cancellation_charge, refund_amount, ...rest } = b;
+  return { ...rest, base_amount: (b.base_amount || 0) - (discount || 0) }; // discount folded into the plot price so the breakup still adds up
+}
 r.get('/api/bookings', (ctx) => {
   const q = ctx.query; const a = [L.istDate(), ctx.oid]; let sql = BOOKING_LIST;
   if (!ctx.isAdmin) { sql += ' AND b.sold_by=?'; a.push(ctx.user.id); } else if (q.rep) { sql += ' AND b.sold_by=?'; a.push(Number(q.rep)); }
@@ -131,13 +136,22 @@ r.get('/api/bookings', (ctx) => {
   if (q.project_id) { sql += ' AND b.project_id=?'; a.push(Number(q.project_id)); }
   if (q.q) { sql += ' AND (l.name LIKE ? OR b.booking_no LIKE ? OR pl.plot_no LIKE ? OR b.buyer_name LIKE ?)'; const t = `%${q.q}%`; a.push(t, t, t, t); }
   sql += ' ORDER BY b.id DESC LIMIT 500';
-  return all(sql, ...a).map((b) => ({ ...b, outstanding: b.status === 'cancelled' ? 0 : Math.max(0, b.total - b.paid) }));
+  const rows = all(sql, ...a).map((b) => ({ ...b, outstanding: b.status === 'cancelled' ? 0 : Math.max(0, b.total - b.paid) }));
+  return ctx.isAdmin ? rows : rows.map(salesView);
 });
 r.get('/api/bookings/:id', (ctx) => {
   const b = bookingFor(ctx, ctx.params.id);
   const today = L.istDate();
   const installments = all('SELECT * FROM installments WHERE booking_id=? ORDER BY seq', b.id).map((i) => ({ ...i, overdue: b.status !== 'cancelled' && i.due_date < today && i.paid_amount < i.amount - 0.5 }));
   const payments = all('SELECT p.*, u.name AS received_by_name FROM payments p LEFT JOIN users u ON u.id=p.received_by WHERE p.booking_id=? ORDER BY p.id DESC', b.id);
+  if (!ctx.isAdmin) { // sales view: what was sold and to whom — no collections, payment schedule, discount or commission data
+    return {
+      booking: salesView(b), lead: get('SELECT id,name,phone_norm,email,kyc_status FROM leads WHERE id=?', b.lead_id),
+      plot: get('SELECT * FROM plots WHERE id=?', b.plot_id), project: get('SELECT id,name,location,city,rera_no,approval,developer FROM projects WHERE id=?', b.project_id),
+      partner: b.partner_id ? get('SELECT id,name FROM partners WHERE id=?', b.partner_id) : null, rep_name: b.sold_by ? get('SELECT name FROM users WHERE id=?', b.sold_by)?.name : null,
+      kyc: all('SELECT id,doc_type,filename,status,remark,uploaded_at FROM kyc_docs WHERE org_id=? AND lead_id=? ORDER BY id DESC', ctx.oid, b.lead_id),
+    };
+  }
   return {
     booking: b, summary: L.bookingSummary(ctx.oid, b.id), installments, payments,
     lead: get('SELECT id,name,phone_norm,email,kyc_status,portal_token,portal_expires FROM leads WHERE id=?', b.lead_id),
@@ -179,7 +193,7 @@ r.put('/api/bookings/:id/schedule', { admin: true }, (ctx) => {
 });
 
 // ----- payments -----
-r.post('/api/bookings/:id/payments', (ctx) => {
+r.post('/api/bookings/:id/payments', { admin: true }, (ctx) => {
   const b = bookingFor(ctx, ctx.params.id), x = ctx.body;
   if (b.status === 'cancelled') throw bad('This booking is cancelled');
   const amount = round(x.amount);
@@ -265,7 +279,7 @@ r.post('/api/bookings/:id/cancel', { admin: true }, (ctx) => {
 });
 
 // ----- collections -----
-r.get('/api/collections', (ctx) => {
+r.get('/api/collections', { admin: true }, (ctx) => {
   const today = L.istDate(), week = L.istDate(Date.now() + 7 * 864e5);
   let sql = `SELECT i.*, b.booking_no, b.buyer_name, b.buyer_phone, b.sold_by, b.lead_id, pl.plot_no, pr.name AS project_name, u.name AS rep_name, (i.amount-i.paid_amount) AS due
     FROM installments i JOIN bookings b ON b.id=i.booking_id JOIN plots pl ON pl.id=b.plot_id JOIN projects pr ON pr.id=b.project_id LEFT JOIN users u ON u.id=b.sold_by
@@ -321,7 +335,7 @@ r.get('/api/payments/:id/receipt', (ctx) => {
   <p class="muted">Cheques / drafts are subject to realisation. This is a computer generated receipt.</p>
   <button class="np" onclick="print()">Print</button></body></html>`, 'text/html; charset=utf-8');
 });
-r.get('/api/bookings/:id/statement', (ctx) => {
+r.get('/api/bookings/:id/statement', { admin: true }, (ctx) => {
   const b = bookingFor(ctx, ctx.params.id), org = L.getOrg(ctx.oid);
   const pl = get('SELECT * FROM plots WHERE id=?', b.plot_id), pr = get('SELECT * FROM projects WHERE id=?', b.project_id), sm = L.bookingSummary(ctx.oid, b.id);
   const inst = all('SELECT * FROM installments WHERE booking_id=? ORDER BY seq', b.id), pays = all("SELECT * FROM payments WHERE booking_id=? AND voided=0 ORDER BY id", b.id);

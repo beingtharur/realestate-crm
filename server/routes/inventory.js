@@ -2,6 +2,7 @@
 const { r } = require('../router');
 const { all, get, run, tx } = require('../db');
 const L = require('../lib');
+const { readTable } = require('../files');
 const { bad, forbidden, notFound, now, addMs, str, num } = L;
 
 function project(oid, id) { const p = get('SELECT * FROM projects WHERE id=? AND org_id=?', id, oid); if (!p) throw notFound('Project not found'); return p; }
@@ -27,7 +28,8 @@ function projectBody(b, cur = {}) {
     num(pick('base_rate', 0)) || 0, num(pick('dev_charges_per_sqyd', 0)) || 0, pct('registration_pct'), pct('max_discount_pct'), str(pick('amenities')), str(pick('description')), b.status === 'archived' ? 'archived' : b.status === 'active' ? 'active' : cur.status || 'active'];
 }
 
-r.get('/api/projects', (ctx) => all('SELECT * FROM projects WHERE org_id=? ORDER BY status, name', ctx.oid).map((p) => ({ ...p, stats: projectStats(ctx.oid, p.id) })));
+const repProject = (ctx, p) => { if (!ctx.isAdmin) delete p.max_discount_pct; return p; };
+r.get('/api/projects', (ctx) => all('SELECT * FROM projects WHERE org_id=? ORDER BY status, name', ctx.oid).map((p) => ({ ...repProject(ctx, p), stats: projectStats(ctx.oid, p.id) })));
 r.post('/api/projects', { admin: true }, (ctx) => {
   const v = projectBody(ctx.body);
   const x = run('INSERT INTO projects(org_id,name,location,city,developer,rera_no,approval,total_area_acres,base_rate,dev_charges_per_sqyd,registration_pct,max_discount_pct,amenities,description,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
@@ -54,7 +56,7 @@ r.get('/api/projects/:id', (ctx) => {
     WHERE pl.org_id=? AND pl.project_id=? ORDER BY pl.block, LENGTH(pl.plot_no), pl.plot_no`, ctx.oid, p.id);
   const bk = all("SELECT plot_id, booking_no, id, buyer_name FROM bookings WHERE org_id=? AND project_id=? AND status<>'cancelled'", ctx.oid, p.id);
   const map = Object.fromEntries(bk.map((b) => [b.plot_id, b]));
-  return { project: p, stats: projectStats(ctx.oid, p.id), plots: plots.map((x) => ({ ...x, price: L.priceFor(x, p).total, booking: map[x.id] || null })) };
+  return { project: repProject(ctx, { ...p }), stats: projectStats(ctx.oid, p.id), plots: plots.map((x) => ({ ...x, price: L.priceFor(x, p).total, booking: map[x.id] || null })) };
 });
 
 // ----- plots -----
@@ -94,13 +96,9 @@ r.post('/api/projects/:id/plots/bulk', { admin: true }, (ctx) => {
   return { created: made, skipped };
 });
 /** Import plots from CSV/XLSX rows: plot_no, block, area_sqyd, length, width, facing, road_width_ft, rate_per_sqyd, plc_pct */
-r.post('/api/projects/:id/plots/import', { admin: true }, (ctx) => {
+r.post('/api/projects/:id/plots/import', { admin: true }, async (ctx) => {
   const p = project(ctx.oid, ctx.params.id);
-  let rows;
-  if (ctx.body.file_base64) {
-    const buf = Buffer.from(ctx.body.file_base64, 'base64');
-    rows = /\.xlsx$/i.test(ctx.body.filename || '') ? L.parseXlsx(buf) : L.parseCsv(buf.toString('utf8'));
-  } else rows = ctx.body.rows;
+  const rows = ctx.body.file_base64 ? (await readTable(Buffer.from(ctx.body.file_base64, 'base64'), ctx.body.filename)).rows : ctx.body.rows;
   if (!rows || rows.length < 2) throw bad('The file has no data rows');
   const head = rows[0].map((h) => String(h).trim().toLowerCase().replace(/[^a-z0-9]+/g, '_'));
   const idx = (...names) => head.findIndex((h) => names.includes(h));
@@ -162,7 +160,9 @@ r.del('/api/plots/:id', { admin: true }, (ctx) => {
 });
 r.get('/api/plots/:id/price', (ctx) => {
   const pl = plot(ctx.oid, ctx.params.id), p = project(ctx.oid, pl.project_id);
-  return { plot: pl, project: { id: p.id, name: p.name, max_discount_pct: p.max_discount_pct }, price: L.priceFor(pl, p, num(ctx.query.discount) || 0) };
+  const price = L.priceFor(pl, p, ctx.isAdmin ? num(ctx.query.discount) || 0 : 0);
+  if (!ctx.isAdmin) { delete price.max_discount; delete price.discount; }
+  return { plot: pl, project: ctx.isAdmin ? { id: p.id, name: p.name, max_discount_pct: p.max_discount_pct } : { id: p.id, name: p.name }, price };
 });
 r.get('/api/plots', (ctx) => {
   const q = ctx.query;
@@ -198,13 +198,13 @@ r.post('/api/plots/:id/release', (ctx) => {
 });
 
 // ----- discount control -----
-r.get('/api/discounts', (ctx) => {
+r.get('/api/discounts', { admin: true }, (ctx) => {
   const sql = `SELECT d.*, l.name AS lead_name, pl.plot_no, pr.name AS project_name, pr.max_discount_pct, u.name AS requested_by_name, du.name AS decided_by_name,
     ROUND(pl.area_sqyd*pl.rate_per_sqyd) AS base_amount FROM discount_requests d JOIN leads l ON l.id=d.lead_id JOIN plots pl ON pl.id=d.plot_id JOIN projects pr ON pr.id=pl.project_id
     LEFT JOIN users u ON u.id=d.requested_by LEFT JOIN users du ON du.id=d.decided_by WHERE d.org_id=?`;
   return ctx.isAdmin ? all(sql + ' ORDER BY d.id DESC LIMIT 200', ctx.oid) : all(sql + ' AND d.requested_by=? ORDER BY d.id DESC LIMIT 200', ctx.oid, ctx.user.id);
 });
-r.post('/api/discounts', (ctx) => {
+r.post('/api/discounts', { admin: true }, (ctx) => {
   const lead = get('SELECT * FROM leads WHERE id=? AND org_id=?', Number(ctx.body.lead_id), ctx.oid);
   const pl = plot(ctx.oid, ctx.body.plot_id);
   if (!lead) throw bad('Lead not found');

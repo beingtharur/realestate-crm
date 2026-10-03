@@ -126,7 +126,14 @@ r.post('/api/visits/:id/complete', (ctx) => {
   run("UPDATE visits SET status='completed', feedback=?, interest=?, completed_at=? WHERE id=?", str(ctx.body.feedback), interest, now(), v.id);
   L.logActivity(ctx.oid, v.lead_id, ctx.user.id, 'visit', { content: `Site visit completed${interest ? ` — interest: ${interest}` : ''}${ctx.body.feedback ? '. ' + ctx.body.feedback : ''}` });
   const lead = get('SELECT * FROM leads WHERE id=?', v.lead_id);
+  const t0 = addMs(-5000);
   if (stageIx(lead.stage) < stageIx('Site Visit Completed')) L.setStage(ctx.oid, lead.id, 'Site Visit Completed', ctx.user);
+  // every completed visit leaves a follow-up behind: 24 hours later, unless the automation rule or the rep already made one
+  if (!get("SELECT 1 x FROM tasks WHERE org_id=? AND lead_id=? AND status='open' AND (created_at>=? OR due_at>?)", ctx.oid, lead.id, t0, addMs(2 * 3600e3))) {
+    const owner = lead.assigned_to || ctx.user.id;
+    run('INSERT INTO tasks(org_id,lead_id,title,description,due_at,priority,assigned_to,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?)', ctx.oid, lead.id, 'Follow up after site visit', interest ? `Interest after the visit: ${interest}` : 'Auto-created after the site visit', addMs(24 * 3600e3), interest === 'High' ? 'High' : 'Medium', owner, ctx.user.id, now());
+    L.logActivity(ctx.oid, lead.id, ctx.user.id, 'system', { content: 'Follow-up task created for 24 hours after the visit' });
+  }
   return { ok: true };
 });
 r.post('/api/visits/:id/status', (ctx) => {
@@ -146,18 +153,72 @@ r.post('/api/visits/:id/reschedule', (ctx) => {
 });
 
 // ================= CALL & WHATSAPP LOG =================
-const CALL_OUTCOMES = ['Connected', 'Not Answered', 'Busy', 'Switched Off', 'Wrong Number', 'Voicemail', 'Missed'];
+const { CALL_OUTCOMES, CALL_PENDING } = L;
+/** Manual call log. With activity_id it fills in a call that was started from the CRM but never reported by the phone. */
 r.post('/api/leads/:id/calls', (ctx) => {
   const l = leadFor(ctx, ctx.params.id), b = ctx.body;
   const direction = b.direction === 'incoming' ? 'incoming' : 'outgoing';
   if (!CALL_OUTCOMES.includes(b.outcome)) throw bad('Choose the call outcome');
   const dur = Math.max(0, Math.round((num(b.duration_min) ?? 0) * 60 + (num(b.duration_sec) ?? 0)) || Math.round(num(b.duration) || 0));
-  if (b.outcome === 'Connected' && dur <= 0) throw bad('Enter the call duration for a connected call');
-  L.logActivity(ctx.oid, l.id, ctx.user.id, 'call', { direction, outcome: b.outcome, duration: b.outcome === 'Connected' ? dur : 0, content: str(b.notes) });
-  if (l.stage === 'New' && b.outcome === 'Connected') L.setStage(ctx.oid, l.id, 'Contacted', ctx.user);
+  if (b.outcome === 'Connected' && dur <= 0) throw bad('Enter the call duration for a completed call');
+  let pending = null;
+  if (b.activity_id) {
+    pending = get("SELECT * FROM activities WHERE id=? AND org_id=? AND lead_id=? AND type='call' AND outcome IN (?, 'Failed')", Number(b.activity_id), ctx.oid, l.id, CALL_PENDING);
+    if (!pending || (!ctx.isAdmin && pending.user_id !== ctx.user.id)) throw notFound('That call entry can no longer be updated');
+  }
+  L.recordCall(ctx.oid, ctx.user, l, { direction, outcome: b.outcome, duration: dur, notes: b.notes, source: 'manual', activity_id: pending?.id, started_at: pending?.created_at });
   if (b.outcome === 'Wrong Number') L.notifyAdmins(ctx.oid, 'Wrong number reported', `${ctx.user.name} reports a wrong number for ${l.name}`, `#/leads/${l.id}`);
-  L.rescore(ctx.oid, l.id);
   return { ok: true };
+});
+
+// ----- click-to-call from the CRM + Android companion app -----
+/** The CALL button. If the user's phone app is linked, leave a pending entry for the phone to complete. */
+r.post('/api/leads/:id/call-intent', (ctx) => {
+  const l = leadFor(ctx, ctx.params.id);
+  if (!L.companionSession(ctx.user.id)) return { tracked: false };
+  const recent = get("SELECT id FROM activities WHERE org_id=? AND lead_id=? AND user_id=? AND type='call' AND outcome=? AND created_at>?", ctx.oid, l.id, ctx.user.id, CALL_PENDING, addMs(-10 * 60000));
+  const id = recent ? recent.id : Number(L.logActivity(ctx.oid, l.id, ctx.user.id, 'call', { direction: 'outgoing', outcome: CALL_PENDING, duration: 0, meta: { source: 'crm', phone: l.phone_norm }, touch: false }));
+  return { tracked: true, intent_id: id };
+});
+/** What the phone app needs: which numbers are CRM leads (so personal calls never leave the phone) and calls waiting to be made. */
+r.get('/api/device/sync', (ctx) => {
+  const mine = ctx.isAdmin ? '' : ' AND assigned_to=?', args = ctx.isAdmin ? [ctx.oid] : [ctx.oid, ctx.user.id];
+  return {
+    user: { id: ctx.user.id, name: ctx.user.name }, org: L.getOrg(ctx.oid).name, server_time: now(),
+    numbers: all(`SELECT DISTINCT phone_norm FROM leads WHERE org_id=?${mine} LIMIT 50000`, ...args).map((x) => x.phone_norm),
+    pending: all(`SELECT a.id AS intent_id, a.lead_id, l.name AS lead_name, l.phone_norm AS phone, a.created_at FROM activities a JOIN leads l ON l.id=a.lead_id
+      WHERE a.org_id=? AND a.user_id=? AND a.type='call' AND a.outcome=? ORDER BY a.id DESC LIMIT 30`, ctx.oid, ctx.user.id, CALL_PENDING),
+  };
+});
+const DEVICE_TYPES = { outgoing: 'outgoing', incoming: 'incoming', missed: 'incoming', rejected: 'incoming', blocked: 'incoming', voicemail: 'incoming' };
+/** Finished calls read from the phone's call log. Each is matched to a pending CRM call, or to a lead by number. */
+r.post('/api/device/calls', (ctx) => {
+  const calls = Array.isArray(ctx.body.calls) ? ctx.body.calls.slice(0, 200) : [];
+  const results = [];
+  tx(() => calls.forEach((c) => {
+    const ext = str(c.ext_id), pn = L.normPhone(c.phone), type = String(c.type || '').toLowerCase();
+    const startMs = typeof c.started_at === 'number' ? c.started_at : Date.parse(c.started_at);
+    const out = (result, extra = {}) => results.push({ ext_id: ext, result, ...extra });
+    if (!ext || !pn || !(type in DEVICE_TYPES) || isNaN(startMs) || startMs > Date.now() + 5 * 60000 || startMs < Date.now() - 30 * 864e5) return out('invalid');
+    const dup = get('SELECT id, lead_id FROM activities WHERE org_id=? AND user_id=? AND ext_id=?', ctx.oid, ctx.user.id, ext);
+    if (dup) return out('duplicate', { lead_id: dup.lead_id, activity_id: dup.id });
+    const duration = Math.min(86400, Math.max(0, Math.round(num(c.duration) || 0)));
+    const direction = DEVICE_TYPES[type], started = new Date(startMs).toISOString();
+    const outcome = c.status === 'failed' ? 'Failed' : type === 'rejected' || type === 'blocked' ? 'Rejected' : type === 'voicemail' ? 'Voicemail' : type === 'missed' ? 'Missed'
+      : duration > 0 ? 'Connected' : direction === 'outgoing' ? 'Not Answered' : 'Missed';
+    // 1) the call the user started from the CRM a moment ago  2) otherwise the user's lead with this number
+    let pending = null;
+    if (direction === 'outgoing') {
+      pending = get(`SELECT a.* FROM activities a JOIN leads l ON l.id=a.lead_id WHERE a.org_id=? AND a.user_id=? AND a.type='call' AND a.outcome=? AND l.phone_norm=?
+        AND a.created_at>=? AND a.created_at<=? ORDER BY a.id DESC LIMIT 1`, ctx.oid, ctx.user.id, CALL_PENDING, pn, addMs(-15 * 60000, startMs), addMs(90000, startMs));
+    }
+    const lead = pending ? get('SELECT * FROM leads WHERE id=?', pending.lead_id)
+      : get(`SELECT * FROM leads WHERE org_id=? AND phone_norm=?${ctx.isAdmin ? '' : ' AND assigned_to=?'} ORDER BY (stage='Lost'), updated_at DESC LIMIT 1`, ...(ctx.isAdmin ? [ctx.oid, pn] : [ctx.oid, pn, ctx.user.id]));
+    if (!lead) return out('unmatched'); // not a CRM lead of this user — nothing is stored
+    const id = L.recordCall(ctx.oid, ctx.user, lead, { direction, outcome, duration, started_at: started, phone: pn, source: 'device', ext_id: ext, activity_id: pending?.id });
+    out('logged', { lead_id: lead.id, activity_id: id, outcome });
+  }));
+  return { results };
 });
 r.post('/api/leads/:id/whatsapp', (ctx) => {
   const l = leadFor(ctx, ctx.params.id), b = ctx.body;
@@ -179,12 +240,19 @@ r.get('/api/comms', (ctx) => {
   return all(sql, ...a);
 });
 r.get('/api/templates', (ctx) => all('SELECT * FROM templates WHERE org_id=? ORDER BY id', ctx.oid));
+const tplStage = (v) => (v && L.STAGES.includes(v) ? v : null);
+const tplLinks = (v) => (str(v) ? String(v).split(/\r?\n/).map((x) => x.trim()).filter(Boolean).slice(0, 5).join('\n') : null);
 r.post('/api/templates', { admin: true }, (ctx) => {
   const name = str(ctx.body.name), body = str(ctx.body.body);
   if (!name || !body) throw bad('Template name and message are required');
-  return { id: Number(run('INSERT INTO templates(org_id,name,body) VALUES (?,?,?)', ctx.oid, name, body).lastInsertRowid) };
+  return { id: Number(run('INSERT INTO templates(org_id,name,body,stage,link) VALUES (?,?,?,?,?)', ctx.oid, name, body, tplStage(ctx.body.stage), tplLinks(ctx.body.link)).lastInsertRowid) };
 });
-r.put('/api/templates/:id', { admin: true }, (ctx) => { run('UPDATE templates SET name=COALESCE(?,name), body=COALESCE(?,body) WHERE id=? AND org_id=?', str(ctx.body.name), str(ctx.body.body), ctx.params.id, ctx.oid); return { ok: true }; });
+r.put('/api/templates/:id', { admin: true }, (ctx) => {
+  const b = ctx.body, t = get('SELECT * FROM templates WHERE id=? AND org_id=?', Number(ctx.params.id), ctx.oid);
+  if (!t) throw notFound('Template not found');
+  run('UPDATE templates SET name=?, body=?, stage=?, link=? WHERE id=?', str(b.name) || t.name, str(b.body) || t.body, 'stage' in b ? tplStage(b.stage) : t.stage, 'link' in b ? tplLinks(b.link) : t.link, t.id);
+  return { ok: true };
+});
 r.del('/api/templates/:id', { admin: true }, (ctx) => { run('DELETE FROM templates WHERE id=? AND org_id=?', ctx.params.id, ctx.oid); return { ok: true }; });
 /** Fill {name} {rep} {company} {project} {project_part} {size} {phone} in a template for one lead. */
 r.post('/api/templates/render', (ctx) => {
@@ -194,15 +262,18 @@ r.post('/api/templates/render', (ctx) => {
   const pr = l.pref_project_id ? get('SELECT name FROM projects WHERE id=?', l.pref_project_id) : null;
   const vars = { name: l.name.split(' ')[0], full_name: l.name, rep: ctx.user.name, company: L.getOrg(ctx.oid).name, project: pr?.name || 'our project', project_part: pr ? ` at ${pr.name}` : '',
     size: l.pref_size_min ? `${l.pref_size_min} sq.yd` : 'your preferred size', phone: L.fmtPhone(l.phone_norm) };
-  const text = tpl.body.replace(/\{(\w+)\}/g, (m, k) => (k in vars ? vars[k] : m));
+  let text = tpl.body.replace(/\{(\w+)\}/g, (m, k) => (k in vars ? vars[k] : m));
+  if (tpl.link) text += '\n\n' + tpl.link;   // brochure / price sheet / location pin links travel with the message
   return { text, wa_link: `https://wa.me/91${l.phone_norm}?text=${encodeURIComponent(text)}` };
 });
 
 // ================= TELEPHONY / WHATSAPP WEBHOOK =================
 function recordEvent(oid, e, leadId, userId) {
-  L.logActivity(oid, leadId, userId, e.type === 'whatsapp' ? 'whatsapp' : 'call', { direction: e.direction, outcome: e.outcome, duration: e.duration, content: e.content });
   const lead = get('SELECT * FROM leads WHERE id=?', leadId);
-  if (lead.stage === 'New' && (e.type === 'whatsapp' ? e.direction === 'outgoing' : e.outcome === 'Connected')) L.setStage(oid, leadId, 'Contacted', userId ? get('SELECT * FROM users WHERE id=?', userId) : { id: null });
+  const actor = userId ? get('SELECT * FROM users WHERE id=?', userId) : { id: null };
+  if (e.type !== 'whatsapp') return L.recordCall(oid, actor, lead, { direction: e.direction, outcome: e.outcome, duration: e.duration, notes: e.content, source: 'webhook' });
+  L.logActivity(oid, leadId, userId, 'whatsapp', { direction: e.direction, content: e.content });
+  if (lead.stage === 'New' && e.direction === 'outgoing') L.setStage(oid, leadId, 'Contacted', actor);
   L.rescore(oid, leadId);
 }
 r.post('/api/webhook/:code/:secret/event', { public: true }, (ctx) => {

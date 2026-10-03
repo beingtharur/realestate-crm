@@ -8,6 +8,12 @@
     "seed": "node server/seed.js",
     "test": "node server/test.js"
   },
-  "engines": { "node": ">=22.5" },
-  "license": "UNLICENSED"
+  "engines": {
+    "node": ">=22.5"
+  },
+  "license": "UNLICENSED",
+  "dependencies": {
+    "pdfjs-dist": "^6.3.289",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
+  }
 }

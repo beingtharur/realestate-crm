@@ -1,5 +1,5 @@
-// Booking wizard, bookings list/detail, payments, collections, discount approvals.
-import { S, $, $$, esc, get, post, put, patch, api, on, modal, modalForm, confirmDialog, askText, toast, fld, inp, sel, repOptions, projectOptions, inr, inrShort, rel, fmtDT, fmtDate, today,
+// Booking wizard, bookings list/detail, payments, collections, discount approvals. Representatives get the sales view only (no payments, collections or discounts).
+import { snack, S, $, $$, esc, get, post, put, patch, api, on, modal, modalForm, confirmDialog, askText, toast, fld, inp, sel, repOptions, projectOptions, inr, inrShort, rel, fmtDT, fmtDate, today,
   isAdmin, empty, badge, stageBadge, phoneFmt, waLink, nav, reload, authUrl, debounce, leadPicker, wireLeadPickers, userName, spinner, fullLink, copy } from './core.js';
 
 const MODES = ['UPI', 'Bank Transfer', 'Cheque', 'Cash', 'Demand Draft', 'Card', 'Loan Disbursement'];
@@ -17,7 +17,7 @@ export function bookingWizard({ lead = null, plot = null, onDone } = {}) {
       ${lead ? `<input type="hidden" name="lead_id" value="${lead.id}">${fld('Customer', `<div class="card" style="padding:8px 12px"><b>${esc(lead.name)}</b> <span class="muted small">${phoneFmt(lead.phone_norm)}</span></div>`)}` : fld('Customer (lead)', leadPicker('lead_id'))}
       <div class="frm-g">${fld('Project', sel('project_id', projects.map((p) => [p.id, p.name]), plot?.project_id || lead?.pref_project_id || projects[0].id))}${fld('Plot', '<select name="plot_id"></select>')}</div>
       <div id="pbox" class="card mb" style="background:var(--surface2)"></div>
-      <div class="frm-g">${fld('Discount (₹)', inp('discount', '', 'type="number" min="0" placeholder="0"'), '<span id="dnote"></span>')}${fld('Booking date', inp('booked_on', today(), `type="date" max="${today()}"`))}</div>
+      <div class="frm-g">${admin ? fld('Discount (₹)', inp('discount', '', 'type="number" min="0" placeholder="0"'), '<span id="dnote"></span>') : ''}${fld('Booking date', inp('booked_on', today(), `type="date" max="${today()}"`))}</div>
       <h3 class="mb mt">Buyer details</h3><div class="frm-g">${fld('Buyer name', inp('buyer_name', lead?.name || ''))}${fld('Buyer mobile', inp('buyer_phone', lead?.phone_norm || ''))}${fld('PAN (optional)', inp('buyer_pan', '', 'maxlength="10" style="text-transform:uppercase"'))}
         ${fld('Channel partner', sel('partner_id', [['', lead?.partner_id ? 'From lead' : 'Direct (none)'], ...S.meta.partners.filter((p) => p.active).map((p) => [p.id, `${p.name} (${p.commission_pct}%)`])]))}${fld('Address', inp('buyer_address'), '', 'full')}</div></div>
     <div><h3 class="mb">2 · Token & payment plan</h3>
@@ -36,7 +36,7 @@ export function bookingWizard({ lead = null, plot = null, onDone } = {}) {
     f('plot_id').innerHTML = opts.length ? opts.map((x) => `<option value="${x.id}" ${plot && plot.id === x.id ? 'selected' : ''}>${esc(x.plot_no)} · ${x.area_sqyd} sq.yd${x.facing ? ' · ' + esc(x.facing) : ''} · ${inrShort(x.price)}${x.status === 'hold' ? ' (your hold)' : ''}</option>`).join('') : '<option value="">No available plots</option>';
     preview(true);
   };
-  const params = () => ({ plot_id: Number(f('plot_id').value), discount: Number(f('discount').value) || 0, token_amount: Number(f('token_amount').value) || 0, down_pct: f('down_pct').value, emi_count: f('emi_count').value, emi_interval_days: f('emi_interval_days').value, final_pct: f('final_pct').value, start_date: f('booked_on').value });
+  const params = () => ({ plot_id: Number(f('plot_id').value), discount: admin ? Number(f('discount').value) || 0 : 0, token_amount: Number(f('token_amount').value) || 0, down_pct: f('down_pct').value, emi_count: f('emi_count').value, emi_interval_days: f('emi_interval_days').value, final_pct: f('final_pct').value, start_date: f('booked_on').value });
   const drawRows = () => {
     $('#sched', m.el).innerHTML = rows.map((r, i) => `<tr><td>${inp('', r.label, `data-i="${i}" data-k="label"`)}</td><td>${inp('', r.due_date, `type="date" data-i="${i}" data-k="due_date"`)}</td><td>${inp('', r.amount, `type="number" data-i="${i}" data-k="amount" style="text-align:right"`)}</td><td><button class="btn sm ghost" data-rm="${i}">✕</button></td></tr>`).join('');
     checkSum();
@@ -52,12 +52,12 @@ export function bookingWizard({ lead = null, plot = null, onDone } = {}) {
     try {
       pv = await post('/bookings/preview', p); const x = pv.price;
       $('#pbox', m.el).innerHTML = `<table class="price-t"><tr><td>Base (${x.area} sq.yd × ${inr(x.rate)})</td><td class="right">${inr(x.base)}</td></tr>${x.plc ? `<tr><td>Preferential location charges</td><td class="right">${inr(x.plc)}</td></tr>` : ''}${x.dev ? `<tr><td>Development charges</td><td class="right">${inr(x.dev)}</td></tr>` : ''}${x.reg ? `<tr><td>Registration / stamp duty</td><td class="right">${inr(x.reg)}</td></tr>` : ''}${x.discount ? `<tr><td>Discount</td><td class="right" style="color:var(--green)">− ${inr(x.discount)}</td></tr>` : ''}<tr class="tot"><td>Total price</td><td class="right">${inr(x.total)}</td></tr></table>`;
-      $('#dnote', m.el).innerHTML = x.discount > x.max_discount ? `<span style="color:var(--red)">Above the ${inr(x.max_discount)} limit — ${admin ? 'admin override will be logged' : 'needs admin approval'}</span>` : `Self-approved up to ${inr(x.max_discount)}`;
+      if (admin) $('#dnote', m.el).innerHTML = x.discount > x.max_discount ? `<span style="color:var(--red)">Above the ${inr(x.max_discount)} limit — ${admin ? 'admin override will be logged' : 'needs admin approval'}</span>` : `Self-approved up to ${inr(x.max_discount)}`;
       if (regen || !manual) { rows = pv.installments.map((r) => ({ ...r })); manual = false; drawRows(); } else checkSum();
     } catch (e) { $('#pbox', m.el).innerHTML = `<span style="color:var(--red)">${esc(e.message)}</span>`; }
   }, 250);
   f('project_id').onchange = fillPlots; f('plot_id').onchange = () => preview(true);
-  ['discount', 'token_amount', 'down_pct', 'emi_count', 'emi_interval_days', 'final_pct', 'booked_on'].forEach((n) => (f(n).oninput = () => preview(false)));
+  ['discount', 'token_amount', 'down_pct', 'emi_count', 'emi_interval_days', 'final_pct', 'booked_on'].forEach((n) => { if (f(n)) f(n).oninput = () => preview(false); });
   $('#regen', m.el).onclick = () => { manual = false; preview(true); };
   $('#addrow', m.el).onclick = () => { manual = true; rows.push({ label: 'Instalment', due_date: today(), amount: 0 }); drawRows(); };
   on($('#sched', m.el), 'input', '[data-i]', (el) => { manual = true; rows[el.dataset.i][el.dataset.k] = el.dataset.k === 'amount' ? Number(el.value) : el.value; checkSum(); });
@@ -66,13 +66,13 @@ export function bookingWizard({ lead = null, plot = null, onDone } = {}) {
   $('#bk-go', m.el).onclick = async (e) => {
     errBox.innerHTML = ''; const btn = e.target; btn.disabled = true;
     try {
-      const d = {}; ['lead_id', 'plot_id', 'discount', 'token_amount', 'token_mode', 'token_ref', 'booked_on', 'buyer_name', 'buyer_phone', 'buyer_address', 'buyer_pan', 'partner_id', 'notes'].forEach((n) => (d[n] = f(n).value));
+      const d = {}; ['lead_id', 'plot_id', 'discount', 'token_amount', 'token_mode', 'token_ref', 'booked_on', 'buyer_name', 'buyer_phone', 'buyer_address', 'buyer_pan', 'partner_id', 'notes'].forEach((n) => (d[n] = f(n) ? f(n).value : ''));
       if (!d.lead_id) throw new Error('Choose the customer');
       const r = await post('/bookings', { ...d, lead_id: Number(d.lead_id), plot_id: Number(d.plot_id), discount: Number(d.discount) || 0, token_amount: Number(d.token_amount), partner_id: d.partner_id ? Number(d.partner_id) : undefined, installments: rows });
       $('.modal-b', m.el).innerHTML = `<div class="ok-box"><b>🎉 Booking ${esc(r.booking_no)} created.</b> The plot is now marked Booked and the lead moved to Booked.</div>
         <div class="row mt"><a class="btn primary" target="_blank" href="${authUrl('/payments/' + r.payment_id + '/receipt')}">🖨 Print token receipt</a><a class="btn" href="#/bookings/${r.id}" data-close>Open booking</a></div>`;
       $('.modal-f', m.el).remove(); onDone && onDone(r);
-    } catch (err) { errBox.innerHTML = `<div class="err">${esc(err.message)}${/approval/i.test(err.message) && lead ? ' <a href="#" id="reqd">Request approval now</a>' : ''}</div>`; const rq = $('#reqd', m.el); if (rq) rq.onclick = async (ev) => { ev.preventDefault(); try { await post('/discounts', { lead_id: lead.id, plot_id: Number(f('plot_id').value), amount: Number(f('discount').value), reason: 'Requested during booking' }); toast('Approval requested from admin', 'ok'); } catch (e2) { toast(e2.message, 'err'); } }; m.el.scrollTo?.(0, 0); }
+    } catch (err) { errBox.innerHTML = `<div class="err">${esc(err.message)}</div>`; m.el.scrollTo?.(0, 0); }
     finally { btn.disabled = false; }
   };
   fillPlots();
@@ -85,7 +85,7 @@ export function paymentModal(b, summary, installments, onDone, instId) {
     <div class="frm-g">${fld('Amount received (₹)', inp('amount', next ? Math.round(next.amount - next.paid_amount) : '', 'type="number" min="1"'))}${fld('Mode', sel('mode', MODES, 'UPI'))}${fld('Reference (UTR / cheque no.)', inp('ref_no'))}${fld('Received on', inp('paid_on', today(), `type="date" max="${today()}"`))}
     ${fld('Apply to', sel('installment_id', [['', 'Oldest dues first (automatic)'], ...installments.filter((i) => i.paid_amount < i.amount - 0.5).map((i) => [i.id, `${i.label} — due ${fmtDate(i.due_date)} (${inr(i.amount - i.paid_amount)})`])], instId || ''), '', 'full')}${fld('Note', inp('note'), '', 'full')}</div>
     <p class="small muted">Cash payments of ₹2,00,000 or more are not permitted (Income Tax Act §269ST).</p>`,
-    onSubmit: async (d) => { const r = await post(`/bookings/${b.id}/payments`, { ...d, amount: Number(d.amount), installment_id: d.installment_id ? Number(d.installment_id) : undefined }); toast(`Receipt ${r.receipt_no} created`, 'ok'); window.open(authUrl(`/payments/${r.id}/receipt`), '_blank'); onDone && onDone(); } });
+    onSubmit: async (d) => { const r = await post(`/bookings/${b.id}/payments`, { ...d, amount: Number(d.amount), installment_id: d.installment_id ? Number(d.installment_id) : undefined }); toast(`Receipt ${r.receipt_no} created`, 'ok'); window.open(authUrl(`/payments/${r.id}/receipt`), '_blank'); onDone && onDone(); receiptWhatsApp(b, d.amount, r); } });
 }
 
 // ================= list =================
@@ -97,8 +97,8 @@ export async function list(root) {
   const draw = async () => {
     const qs = new URLSearchParams(Object.entries(F).filter(([, v]) => v)); const rows = await get('/bookings?' + qs);
     $('#bc').textContent = `${rows.length} booking${rows.length === 1 ? '' : 's'} · ${inrShort(rows.filter((r) => r.status !== 'cancelled').reduce((s, r) => s + r.total, 0))} sales value`;
-    $('#bl').innerHTML = rows.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Booking</th><th>Buyer</th><th>Plot</th><th class="r">Total</th><th class="r">Paid</th><th class="r">Outstanding</th><th>Status</th>${admin ? '<th>Sold by</th>' : ''}</tr></thead><tbody>${rows.map((b) => `<tr class="click" data-id="${b.id}"><td><b>${esc(b.booking_no)}</b><div class="muted small">${fmtDate(b.booked_on)}</div></td><td>${esc(b.buyer_name)}<div class="muted small">${phoneFmt(b.buyer_phone)}</div></td><td>${esc(b.project_name)}<div class="muted small">Plot ${esc(b.plot_no)} · ${b.area_sqyd} sq.yd</div></td><td class="r">${inr(b.total)}</td><td class="r">${inr(b.paid)}</td>
-      <td class="r">${inr(b.outstanding)}${b.overdue_amount ? `<div class="small" style="color:var(--red)">${inr(b.overdue_amount)} overdue</div>` : ''}</td><td>${bBadge(b.status)}</td>${admin ? `<td>${esc(b.rep_name || '—')}</td>` : ''}</tr>`).join('')}</tbody></table></div>` : empty('No bookings yet', 'Book a plot from a lead\'s page or with "New booking".');
+    $('#bl').innerHTML = rows.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Booking</th><th>Buyer</th><th>Plot</th><th class="r">Total</th>${admin ? '<th class="r">Paid</th><th class="r">Outstanding</th>' : ''}<th>Status</th>${admin ? '<th>Sold by</th>' : ''}</tr></thead><tbody>${rows.map((b) => `<tr class="click" data-id="${b.id}"><td><b>${esc(b.booking_no)}</b><div class="muted small">${fmtDate(b.booked_on)}</div></td><td>${esc(b.buyer_name)}<div class="muted small">${phoneFmt(b.buyer_phone)}</div></td><td>${esc(b.project_name)}<div class="muted small">Plot ${esc(b.plot_no)} · ${b.area_sqyd} sq.yd</div></td><td class="r">${inr(b.total)}</td>${admin ? `<td class="r">${inr(b.paid)}</td>
+      <td class="r">${inr(b.outstanding)}${b.overdue_amount ? `<div class="small" style="color:var(--red)">${inr(b.overdue_amount)} overdue</div>` : ''}</td>` : ''}<td>${bBadge(b.status)}</td>${admin ? `<td>${esc(b.rep_name || '—')}</td>` : ''}</tr>`).join('')}</tbody></table></div>` : empty('No bookings yet', 'Book a plot from a lead\'s page or with "New booking".');
   };
   on($('#bl'), 'click', 'tr.click', (tr) => nav('#/bookings/' + tr.dataset.id));
   $('#q').oninput = debounce((e) => { F.q = e.target.value; draw(); });
@@ -114,6 +114,16 @@ export async function detail(root, { id }, q) {
   const load = async () => {
     let d; try { d = await get('/bookings/' + id); } catch { root.innerHTML = `<a href="#/bookings">← Bookings</a>${empty('Booking not found')}`; return; }
     cur = d;
+    if (!admin) { // sales view: the sale, the plot and the documents — no payments, dues, discount or commission
+      const b = d.booking;
+      root.innerHTML = `<div class="mb"><a href="#/bookings">← Bookings</a></div>
+      <div class="ph1"><div><h1>${esc(b.booking_no)} ${bBadge(b.status)}</h1><p><a href="#/leads/${b.lead_id}">${esc(b.buyer_name)}</a> · ${phoneFmt(b.buyer_phone)} · ${esc(d.project.name)} · Plot ${esc(d.plot.plot_no)} · booked ${fmtDate(b.booked_on)}</p></div>
+        <div class="row"><a class="btn" href="tel:+91${b.buyer_phone}" data-call="${b.lead_id}" data-call-name="${esc(b.buyer_name)}">📞 Call</a><button class="btn" data-wa="${b.lead_id}" data-wa-name="${esc(b.buyer_name)}" data-wa-phone="${b.buyer_phone}">💬 WhatsApp</button><button class="btn" data-a="edit">✏️ Buyer details</button></div></div>
+      <div class="grid g2 stack"><div class="card"><h3>Price</h3><table class="price-t"><tr><td>Plot price (${b.area_sqyd} sq.yd × ${inr(b.rate)})</td><td class="right">${inr(b.base_amount)}</td></tr>${b.plc_amount ? `<tr><td>Preferential location charges</td><td class="right">${inr(b.plc_amount)}</td></tr>` : ''}${b.dev_amount ? `<tr><td>Development charges</td><td class="right">${inr(b.dev_amount)}</td></tr>` : ''}${b.reg_amount ? `<tr><td>Registration / stamp duty</td><td class="right">${inr(b.reg_amount)}</td></tr>` : ''}<tr class="tot"><td>Total</td><td class="right">${inr(b.total)}</td></tr></table></div>
+        <div class="card"><h3>Plot & legal</h3><dl class="kv"><dt>Project</dt><dd>${esc(d.project.name)}${d.project.location ? ', ' + esc(d.project.location) : ''}</dd><dt>RERA / approval</dt><dd>${esc(d.project.rera_no || '—')} · ${esc(d.project.approval || '—')}</dd><dt>Plot</dt><dd>${esc(d.plot.plot_no)} · ${d.plot.area_sqyd} sq.yd${d.plot.facing ? ' · ' + esc(d.plot.facing) + ' facing' : ''}${d.plot.road_width_ft ? ' · ' + d.plot.road_width_ft + ' ft road' : ''}</dd><dt>Agreement</dt><dd>${b.agreement_date ? fmtDate(b.agreement_date) : '—'}</dd><dt>Registration</dt><dd>${b.registration_date ? fmtDate(b.registration_date) : '—'}</dd><dt>Buyer PAN</dt><dd>${esc(b.buyer_pan || '—')}</dd><dt>Address</dt><dd>${esc(b.buyer_address || '—')}</dd><dt>Notes</dt><dd>${esc(b.notes || '—')}</dd></dl></div>
+        <div class="card"><div class="card-h"><h3>KYC documents</h3>${badge(d.lead.kyc_status || 'none', d.lead.kyc_status === 'verified' ? 'b-green' : d.lead.kyc_status === 'pending' ? 'b-amber' : '')}</div>${d.kyc.length ? d.kyc.map((k) => `<div class="list-row"><span>${esc(k.doc_type)}</span>${badge(k.status, k.status === 'verified' ? 'b-green' : k.status === 'rejected' ? 'b-red' : 'b-amber')}</div>`).join('') : '<p class="muted">No documents uploaded.</p>'}<a href="#/leads/${b.lead_id}" class="small">Manage on the lead page →</a></div></div>`;
+      return;
+    }
     const b = d.booking, sm = d.summary, pct = b.total ? Math.min(100, (sm.paid / b.total) * 100) : 0, cancelled = b.status === 'cancelled';
     root.innerHTML = `<div class="mb"><a href="#/bookings">← Bookings</a></div>
     <div class="ph1"><div><h1>${esc(b.booking_no)} ${bBadge(b.status)}</h1><p><a href="#/leads/${b.lead_id}">${esc(b.buyer_name)}</a> · ${phoneFmt(b.buyer_phone)} · ${esc(d.project.name)} · Plot ${esc(d.plot.plot_no)}${d.plot.block ? ' (Block ' + esc(d.plot.block) + ')' : ''} · Sold by ${esc(d.rep_name || '—')} on ${fmtDate(b.booked_on)}</p></div>
@@ -158,7 +168,7 @@ export async function detail(root, { id }, q) {
   on(root, 'click', '[data-void]', async (el) => { const r = await askText('Void receipt', 'Reason for voiding (e.g. cheque bounced)'); if (!r) return; try { await post(`/payments/${el.dataset.void}/void`, { reason: r }); toast('Receipt voided', 'ok'); load(); } catch (e) { toast(e.message, 'err'); } });
   on(root, 'click', '[data-comm]', async (el) => { await post(`/commissions/${el.dataset.comm}/status`, { status: 'paid' }); toast('Commission marked paid', 'ok'); load(); });
   await load();
-  if (q.pay && cur) paymentModal(cur.booking, cur.summary, cur.installments, load, Number(q.pay));
+  if (q.pay && cur && admin) paymentModal(cur.booking, cur.summary, cur.installments, load, Number(q.pay));
 }
 
 // ================= collections =================
@@ -171,7 +181,7 @@ export async function collections(root) {
     <div class="tabs">${[['overdue', 'Overdue'], ['week', 'Next 7 days'], ['later', 'Later'], ['all', 'All']].map(([k, l]) => `<button data-t="${k}" class="${tab === k ? 'on' : ''}">${l}${k !== 'all' ? ` <span class="muted small">(${data.rows.filter((r) => r.bucket === k).length})</span>` : ''}</button>`).join('')}</div>
     ${rows.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Buyer</th><th>Booking</th><th>Instalment</th><th>Due date</th><th class="r">Pending</th>${admin ? '<th>Rep</th>' : ''}<th></th></tr></thead><tbody>${rows.map((r) => `<tr><td><b>${esc(r.buyer_name)}</b><div class="muted small">${phoneFmt(r.buyer_phone)}</div></td><td><a href="#/bookings/${r.booking_id}">${esc(r.booking_no)}</a><div class="muted small">${esc(r.project_name)} · Plot ${esc(r.plot_no)}</div></td><td>${esc(r.label)}</td>
       <td>${fmtDate(r.due_date)}<div class="small" style="color:var(--${r.bucket === 'overdue' ? 'red' : 'muted'})">${r.days < 0 ? Math.abs(r.days) + ' days overdue' : r.days === 0 ? 'due today' : 'in ' + r.days + ' days'}</div></td><td class="r"><b>${inr(r.due)}</b></td>${admin ? `<td>${esc(r.rep_name || '—')}</td>` : ''}
-      <td class="nowrap right"><a class="btn sm" href="tel:+91${r.buyer_phone}">📞</a> <a class="btn sm" target="_blank" href="${waLink(r.buyer_phone, `Dear ${r.buyer_name}, this is a reminder from ${S.org.name} that ${inr(r.due)} towards ${r.label} (${r.booking_no}) ${r.days < 0 ? 'was due on' : 'is due on'} ${fmtDate(r.due_date)}. Kindly pay via UPI/bank transfer and share the reference. Thank you.`)}">💬 Remind</a> <a class="btn sm primary" href="#/bookings/${r.booking_id}?pay=${r.id}">Record</a></td></tr>`).join('')}</tbody></table></div>` : empty('Nothing here 🎉', 'No instalments in this bucket.')}`;
+      <td class="nowrap right"><a class="btn sm" href="tel:+91${r.buyer_phone}" data-call="${r.lead_id}" data-call-name="${esc(r.buyer_name)}">📞</a> <a class="btn sm" target="_blank" href="${waLink(r.buyer_phone, `Dear ${r.buyer_name}, this is a reminder from ${S.org.name} that ${inr(r.due)} towards ${r.label} (${r.booking_no}) ${r.days < 0 ? 'was due on' : 'is due on'} ${fmtDate(r.due_date)}. Kindly pay via UPI/bank transfer and share the reference. Thank you.`)}">💬 Remind</a> <a class="btn sm primary" href="#/bookings/${r.booking_id}?pay=${r.id}">Record</a></td></tr>`).join('')}</tbody></table></div>` : empty('Nothing here 🎉', 'No instalments in this bucket.')}`;
   };
   on(root, 'click', '[data-t]', (el) => { tab = el.dataset.t; draw(); });
   data = await get('/collections'); if (!data.rows.some((r) => r.bucket === 'overdue')) tab = 'week'; draw();
@@ -194,4 +204,13 @@ export async function discounts(root) {
       onSubmit: async (d) => { await post(`/discounts/${el.dataset.id}/decide`, { decision: el.dataset.d, amount: d.amount ? Number(d.amount) : undefined, note: d.note }); toast('Decision saved', 'ok'); rows = await get('/discounts'); draw(); } });
   });
   rows = await get('/discounts'); draw();
+}
+
+/** After a payment is saved: offer to send the buyer a WhatsApp confirmation. */
+function receiptWhatsApp(b, amount, r) {
+  const phone = b.buyer_phone || b.lead_phone;
+  if (!phone) return;
+  const first = String(b.buyer_name || b.lead_name || '').split(' ')[0] || 'there';
+  const text = `Hi ${first}, we have received ₹${Number(amount).toLocaleString('en-IN')} towards booking ${b.booking_no}${r.receipt_no ? ' (receipt ' + r.receipt_no + ')' : ''}. Thank you! — ${S.org.name}`;
+  snack(`Payment saved. Send ${first} a confirmation?`, 'WhatsApp', () => window.open(waLink(String(phone).slice(-10), text), '_blank'), 12000);
 }

@@ -11,6 +11,7 @@ require('./routes/leads');
 require('./routes/work');
 require('./routes/sales');
 require('./routes/insights');
+require('./routes/ops');
 const { tick } = require('./jobs');
 
 const PUBLIC = path.join(__dirname, '..', 'public');
