@@ -1,0 +1,17 @@
+# Render Blueprint: one web service built from the Dockerfile, with a persistent disk for the database.
+# Persistent disks need a paid instance type (starter or above) — on the free plan data is lost on every restart.
+services:
+  - type: web
+    name: realestate-crm
+    runtime: docker
+    plan: starter
+    healthCheckPath: /
+    envVars:
+      - key: DATA_DIR
+        value: /data
+      - key: PORT
+        value: "3000"
+    disk:
+      name: crm-data
+      mountPath: /data
+      sizeGB: 1

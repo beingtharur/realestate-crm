@@ -244,6 +244,8 @@ Keep the running list here so it survives across sessions.
 
 **Hosting note (Vercel and similar):** RealtyPilot is one long-running Node server with a SQLite file and a held-open alerts connection. Serverless hosts such as Vercel have no persistent disk and stop functions after seconds, so data would vanish and phone alerts would not work. Use a small VPS, Railway/Render/Fly with a persistent volume (mount it at `DATA_DIR`), or the Dockerfile. Vercel can only host a static front-end, which this app is not.
 
+**Deploy on Render (persistent disk):** `render.yaml` in this repo is a ready Blueprint (Docker build, 1 GB disk mounted at `/data`, `DATA_DIR=/data`). In Render: *New → Blueprint* → pick this repo → *Apply*. Disks need a paid instance (Starter, about $7/month); on the free plan the database is wiped on every restart. Afterwards open the service URL, click *Create your organization*, and give reps the same URL (the Android app needs the `https://…onrender.com` address). Render's GitHub app must be installed on the GitHub account that owns the repo (`beingtharur`).
+
 **Backup** (do nightly): copy the whole `DATA_DIR`. For a consistent copy while running:
 ```bash
 sqlite3 data/realtypilot.db ".backup 'backup/realtypilot-$(date +%F).db'" && cp -R data/uploads backup/
