@@ -34,6 +34,15 @@ const checkPw = (pw, stored) => {
   const hb = Buffer.from(h, 'hex');
   return c.length === hb.length && crypto.timingSafeEqual(c, hb);
 };
+/** Sliding-window limiter kept in memory: true = allowed. Keys are free-form (e.g. 'login:1.2.3.4'). */
+const _hits = new Map();
+function hit(key, max, windowMs) {
+  const t = Date.now(), h = (_hits.get(key) || []).filter((x) => t - x < windowMs);
+  if (h.length >= max) { _hits.set(key, h); return false; }
+  h.push(t); _hits.set(key, h);
+  return true;
+}
+setInterval(() => { const t = Date.now(); for (const [k, v] of _hits) if (!v.length || t - v[v.length - 1] > 3600e3) _hits.delete(k); }, 600e3).unref();
 const round = (n) => Math.round(Number(n) || 0);
 const num = (v) => (v === '' || v === null || v === undefined || isNaN(Number(v)) ? null : Number(v));
 const str = (v) => (v === undefined || v === null ? null : String(v).trim() || null);
@@ -513,7 +522,7 @@ function recordCall(oid, actor, lead, c) {
 }
 
 module.exports = {
-  HttpError, bad, forbidden, notFound, STAGES, OPEN_STAGES, LOST_REASONS, SOURCES, now, addMs, sha, newToken, hashPw, checkPw,
+  HttpError, bad, forbidden, notFound, STAGES, OPEN_STAGES, LOST_REASONS, SOURCES, now, addMs, sha, newToken, hashPw, checkPw, hit,
   round, num, str, normPhone, fmtPhone, period, dayRange, istDate, haversine, parseUA, parseCsv, toCsv,
   getOrg, getSettings, saveSettings, notify, notifyAdmins, audit, logActivity, rescore, activeMember, repHealth, openLeadCount,
   isRoutable, isOnShift, workHours, shiftStartToday, istClock, hm, getPrefs, inDnd, PUSH_KINDS, ADMIN_ONLY_NOTICES, visibleNotifications,

@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server/index.js",
     "seed": "node server/seed.js",
-    "test": "node server/test.js"
+    "test": "node server/test.js",
+    "backup": "node -e \"console.log(require('./server/db').backup())\""
   },
   "engines": {
     "node": ">=22.5"

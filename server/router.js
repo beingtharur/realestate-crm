@@ -45,6 +45,19 @@ function authenticate(req, query) {
   return u;
 }
 
+/**
+ * Real client address. Behind a proxy (Render) the socket address is the proxy, so every visitor would look
+ * identical. TRUST_PROXY = number of proxy hops in front of us (0 = none); we read that many entries from the
+ * right of X-Forwarded-For, which the client cannot forge.
+ */
+function clientIp(req) {
+  const hops = Number(process.env.TRUST_PROXY) || 0;
+  const sock = req.socket.remoteAddress;
+  if (!hops) return sock;
+  const parts = String(req.headers['x-forwarded-for'] || '').split(',').map((x) => x.trim()).filter(Boolean);
+  return parts[parts.length - hops] || sock;
+}
+
 async function handle(req, res, url) {
   const query = Object.fromEntries(url.searchParams);
   for (const rt of routes) {
@@ -59,7 +72,7 @@ async function handle(req, res, url) {
     const body = req.method === 'GET' || req.method === 'DELETE' ? {} : await readBody(req);
     const ctx = {
       req, res, user, oid: user ? user.org_id : null, params, query, body,
-      ip: req.socket.remoteAddress, ua: req.headers['user-agent'] || '', isAdmin: !!user && user.role === 'admin',
+      ip: clientIp(req), ua: req.headers['user-agent'] || '', isAdmin: !!user && user.role === 'admin',
     };
     return rt.fn(ctx);
   }

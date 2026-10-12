@@ -1,5 +1,6 @@
 // `npm run seed` — fills the database with a realistic demo company so you can explore every screen.
 // Sign in afterwards with  admin@demo.test / demo12345  (reps: ravi@demo.test, sita@demo.test, imran@demo.test — same password).
+process.env.ALLOW_SIGNUP = 'true';
 const { server } = require('./index');
 const { get: dbGet } = require('./db');
 

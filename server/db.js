@@ -230,4 +230,14 @@ function tx(fn) {
   catch (e) { db.exec('ROLLBACK'); throw e; }
   finally { depth--; }
 }
-module.exports = { db, all, get, run, tx, DATA_DIR };
+/** Consistent copy of the database (safe while the app is running). Keeps the newest `keep` copies in DATA_DIR/backups. */
+function backup(keep = 7) {
+  const dir = path.join(DATA_DIR, 'backups');
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `realtypilot-${new Date().toISOString().replace(/[:.]/g, '-')}.db`);
+  db.exec(`VACUUM INTO '${file.replace(/'/g, "''")}'`);
+  const old = fs.readdirSync(dir).filter((f) => /^realtypilot-.*\.db$/.test(f)).sort().reverse().slice(keep);
+  for (const f of old) fs.unlinkSync(path.join(dir, f));
+  return file;
+}
+module.exports = { db, all, get, run, tx, DATA_DIR, backup };

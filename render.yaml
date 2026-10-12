@@ -5,12 +5,21 @@ services:
     name: realestate-crm
     runtime: docker
     plan: starter
-    healthCheckPath: /
+    healthCheckPath: /healthz
     envVars:
       - key: DATA_DIR
         value: /data
       - key: PORT
         value: "3000"
+      - key: NODE_ENV
+        value: production
+      # Render puts one proxy in front of the app; this makes rate limits use the visitor's address, not the proxy's.
+      - key: TRUST_PROXY
+        value: "1"
+      # The first organization can always be created; after that new sign-ups are closed. Leave this false.
+      - key: ALLOW_SIGNUP
+        value: "false"
+      # Optional AI assistant — add ANTHROPIC_API_KEY in the Render dashboard (never in this file).
     disk:
       name: crm-data
       mountPath: /data

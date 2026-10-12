@@ -289,7 +289,9 @@ const authWrap = (inner) => `<div class="auth"><div class="card"><div class="log
 async function login(root, _p, q) {
   document.title = 'Sign in · RealtyPilot';
   // Team members who joined through an invitation (on this browser, or just now) belong to an existing organization — they are never offered "Create your organization".
-  const invited = q.invited === '1' || store.get('rp_invited') === '1';
+  let canSignup = true;
+  try { canSignup = (await api('GET', '/auth/status')).signup_open; } catch { /* keep the link if the server cannot say */ }
+  const invited = q.invited === '1' || store.get('rp_invited') === '1' || !canSignup;
   root.innerHTML = authWrap(`<h1>${q.invited === '1' ? 'Your account is ready' : 'Welcome back'}</h1><p class="muted" style="margin:0 0 var(--s5)">${q.invited === '1' ? 'Sign in with your email and the password you just set.' : 'Sign in to your sales workspace.'}</p><div id="e"></div>
     <form id="f">${fld('Email', inp('email', q.email || '', 'type="email" required autocomplete="username" autofocus placeholder="you@company.com" data-v="email"'))}${fld('Password', inp('password', '', 'type="password" required autocomplete="current-password" placeholder="••••••••"'))}
     <button class="btn primary" style="width:100%;height:var(--h-touch)" id="go">Sign in</button></form>

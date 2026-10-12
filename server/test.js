@@ -2,6 +2,7 @@
 const os = require('os');
 const path = require('path');
 const fs = require('fs');
+process.env.ALLOW_SIGNUP = 'true'; process.env.LOGIN_RATE_MAX = '1000'; process.env.ENQUIRY_RATE_MAX = '1000';
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'rp-test-'));
 const { server } = require('./index');
 
@@ -570,6 +571,23 @@ const RVtoken = () => 'not-a-real-token';
   x = await call('GET', `/api/leads/${raviLead}`, null, RV); ok(x.status === 404, 'other org cannot open a lead by id');
   x = await call('GET', `/api/bookings/${B1}`, null, RV); ok(x.status === 404, 'other org cannot open a booking');
   x = await call('GET', '/api/projects', null, RV); ok(x.body.length === 0, 'other org sees no projects');
+
+  section('Deployment hardening');
+  { const h = await fetch(base + '/healthz'); ok(h.status === 200, 'health check answers 200'); }
+  { const h = await fetch(base + '/'); ok(h.headers.get('content-security-policy')?.includes("default-src 'self'") && h.headers.get('x-content-type-options') === 'nosniff' && h.headers.get('x-frame-options') === 'DENY', 'security headers on pages'); }
+  { const h = await fetch(base + '/api/auth/status'); ok(h.headers.get('x-content-type-options') === 'nosniff' && h.headers.get('strict-transport-security'), 'security headers on API'); }
+  process.env.ALLOW_SIGNUP = 'false';
+  x = await call('GET', '/api/auth/status'); ok(x.body.signup_open === false, 'signup reported closed');
+  x = await call('POST', '/api/auth/setup', { org_name: 'Spam Co', org_code: 'SPAM', name: 'S', email: 's@spam.test', password: 'password123' });
+  ok(x.status === 403, 'new organizations cannot be created when signup is closed', x.body);
+  process.env.ALLOW_SIGNUP = 'true';
+  process.env.LOGIN_RATE_MAX = '3';
+  let last;
+  for (let i = 0; i < 5; i++) last = await call('POST', '/api/auth/login', { email: 'nobody@nowhere.test', password: 'x' });
+  ok(last.status === 429, 'repeated sign-in attempts from one address are throttled', last);
+  process.env.LOGIN_RATE_MAX = '1000';
+  x = await call('POST', '/api/auth/login', { email: 'admin@green.test', password: 'wrong-password' });
+  ok(x.status === 429 || (x.status === 401 && !/attempt/.test(x.body.error)), 'wrong password does not reveal attempts left', x.body);
 
   console.log(`\n${pass} passed, ${fail} failed`);
   server.close();

@@ -430,11 +430,8 @@ r.post('/api/leads/import/commit', { admin: true }, (ctx) => {
 });
 
 // ----- public intake: enquiry form + webhook -----
-const hits = new Map();
-function rateLimit(ip, max = 10) {
-  const h = (hits.get(ip) || []).filter((t) => Date.now() - t < 3600e3);
-  if (h.length >= max) throw new HttpError(429, 'Too many submissions. Please try again later.');
-  h.push(Date.now()); hits.set(ip, h);
+function rateLimit(ip, max = Number(process.env.ENQUIRY_RATE_MAX) || 10) {
+  if (!L.hit('enquire:' + ip, max, 3600e3)) throw new HttpError(429, 'Too many submissions. Please try again later.');
 }
 r.post('/api/public/enquire/:code', { public: true }, (ctx) => {
   const org = get('SELECT * FROM orgs WHERE code=?', ctx.params.code);

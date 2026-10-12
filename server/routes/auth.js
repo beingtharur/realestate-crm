@@ -24,7 +24,13 @@ function cleanLogo(v) {
   if (v.length > 400000) throw bad('Logo is too large — use an image under 300 KB');
   return v;
 }
+// Creating organizations is closed by default once the first one exists (set ALLOW_SIGNUP=true to open it).
+const signupOpen = () => process.env.ALLOW_SIGNUP === 'true' || !get('SELECT 1 x FROM orgs LIMIT 1');
+const loginMax = () => Number(process.env.LOGIN_RATE_MAX) || 20;
+r.get('/api/auth/status', { public: true }, () => ({ signup_open: signupOpen() }));
 r.post('/api/auth/setup', { public: true }, (ctx) => {
+  if (!signupOpen()) throw new HttpError(403, 'Creating new organizations is disabled on this server. Ask your administrator for an invitation.');
+  if (!L.hit('setup:' + ctx.ip, 5, 3600e3)) throw new HttpError(429, 'Too many attempts. Please try again later.');
   const b = ctx.body;
   const org_name = str(b.org_name), code = str(b.org_code), name = str(b.name), email = str(b.email)?.toLowerCase();
   if (!org_name || !code || !name || !email) throw bad('Organization name, code, admin name and email are required');
@@ -52,6 +58,7 @@ r.post('/api/auth/setup', { public: true }, (ctx) => {
 });
 
 r.post('/api/auth/login', { public: true }, (ctx) => {
+  if (!L.hit('login:' + ctx.ip, loginMax(), 15 * 60000)) throw new HttpError(429, 'Too many sign-in attempts from this network. Please wait a few minutes and try again.');
   const email = String(ctx.body.email || '').trim().toLowerCase();
   const u = get('SELECT * FROM users WHERE email=?', email);
   if (!u) throw new HttpError(401, 'Invalid email or password');
@@ -63,7 +70,7 @@ r.post('/api/auth/login', { public: true }, (ctx) => {
     const n = u.failed_attempts + 1;
     if (n >= 5) { run('UPDATE users SET failed_attempts=0, locked_until=? WHERE id=?', addMs(15 * 60000), u.id); throw new HttpError(423, 'Too many failed attempts. Account locked for 15 minutes.'); }
     run('UPDATE users SET failed_attempts=? WHERE id=?', n, u.id);
-    throw new HttpError(401, `Invalid email or password (${5 - n} attempt${5 - n === 1 ? '' : 's'} left)`);
+    throw new HttpError(401, 'Invalid email or password');
   }
   if (u.status !== 'active') throw new HttpError(403, 'Your account has been deactivated. Please contact your admin.');
   run('UPDATE users SET failed_attempts=0, locked_until=NULL WHERE id=?', u.id);
@@ -90,11 +97,11 @@ r.post('/api/auth/change-password', (ctx) => {
 });
 
 r.post('/api/auth/forgot', { public: true }, (ctx) => {
+  if (!L.hit('forgot:' + ctx.ip, 10, 3600e3)) throw new HttpError(429, 'Too many requests. Please try again later.');
   const u = get('SELECT * FROM users WHERE email=?', String(ctx.body.email || '').trim().toLowerCase());
   if (u && u.status === 'active') {
     const token = newToken(24);
     run('INSERT INTO resets(user_id,token_hash,expires_at) VALUES (?,?,?)', u.id, sha(token), addMs(3600e3));
-    console.log(`[password reset] ${u.email}: #/reset/${token}`);
     L.notifyAdmins(u.org_id, 'Password reset requested', `${u.name} (${u.email}) asked to reset their password. Generate a reset link from Team & Targets.`, '#/team');
   }
   return { ok: true, message: 'If that email is registered, your admin has been notified and will send you a reset link.' };

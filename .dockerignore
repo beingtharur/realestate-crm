@@ -1,0 +1,11 @@
+node_modules
+.git
+.github
+data
+.env*
+.vercel
+.claude
+*.apk
+android-companion
+*.log
+.DS_Store
