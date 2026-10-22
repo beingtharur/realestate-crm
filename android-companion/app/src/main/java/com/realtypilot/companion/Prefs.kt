@@ -18,7 +18,15 @@ object Prefs {
             .putLong("last_call_date", System.currentTimeMillis()).apply()
     }
 
-    fun clear(c: Context) = sp(c).edit().clear().apply()
+    fun setOrg(c: Context, v: String) = sp(c).edit().putString("org", v).apply()
+    fun askedBattery(c: Context): Boolean = sp(c).getBoolean("asked_battery", false)
+    fun setAskedBattery(c: Context) = sp(c).edit().putBoolean("asked_battery", true).apply()
+
+    /** Signing out forgets the person, not the company address — so the app reopens straight on the CRM sign-in page. */
+    fun clear(c: Context) { val u = baseUrl(c); sp(c).edit().clear().putString("url", u).apply() }
+    fun setBaseUrl(c: Context, url: String) = sp(c).edit().putString("url", url).apply()
+    /** True once the web CRM has handed this app its sign-in token. */
+    fun isSignedInWith(c: Context, t: String) = t.isNotEmpty() && token(c) == t
 
     /** Start time of the newest call-log entry already looked at. */
     fun lastCallDate(c: Context): Long = sp(c).getLong("last_call_date", System.currentTimeMillis())

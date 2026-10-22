@@ -1,6 +1,6 @@
 // Leads: list (list / cards / board), filters, bulk actions, lead drawer, lead page, add/edit form, import.
 import { repLoads, loadOptions, S, $, $$, esc, get, post, patch, del, api, on, modal, modalForm, confirmDialog, askText, toast, fld, inp, sel, repOptions, projectOptions, getForm, inr, inrShort, rel, fmtDT, fmtDate, fmtTime, friendlyDT, dayLabel, dayHeading, istDay,
-  isAdmin, empty, errorState, badge, stageBadge, ratingBadge, statusChip, phoneFmt, waLink, nav, reload, userName, dtLocal, fromDT, copy, fullLink, authUrl, debounce, skeleton, STAGE_CLS, callLabel, callCls, mmss,
+  isAdmin, empty, errorState, badge, stageBadge, ratingBadge, statusChip, phoneFmt, waLink, nav, reload, userName, dtLocal, fromDT, copy, fullLink, authUrl, saveTextFile, debounce, skeleton, STAGE_CLS, callLabel, callCls, mmss,
   quickActions, ico, avatar, drawer, openMenu, store, rememberLead, today, enhanceSelects } from './core.js';
 import { bookingWizard } from './v_bookings.js';
 
@@ -274,7 +274,7 @@ export async function list(root, _p, q) {
     if (act === 'task') return modalForm({ title: `Schedule a follow-up for ${ids.length} lead${ids.length > 1 ? 's' : ''}`, submit: 'Create follow-ups', body: `${fld('What needs to happen?', inp('title', 'Follow up', 'required'))}<div class="frm-g">${fld('Due', inp('due_at', dtLocal(new Date(Date.now() + 86400e3)), 'type="datetime-local" required'))}${fld('Priority', sel('priority', ['High', 'Medium', 'Low'], 'Medium'))}</div>`,
       onSubmit: async (d) => { let ok = 0; for (const id of ids.slice(0, 100)) { try { await post('/tasks', { lead_id: id, title: d.title, due_at: fromDT(d.due_at), priority: d.priority }); ok++; } catch { /* skip */ } } toast(`${ok} follow-up${ok === 1 ? '' : 's'} scheduled`, 'ok'); selected.clear(); load(); } });
     if (act === 'export') { const data = picked(); const csv = [['Name', 'Phone', 'Second phone', 'Email', 'Status', 'Priority', 'Source', 'Project', 'Budget', 'Assigned to', 'Next follow-up', 'Added on', 'Added by'], ...data.map((l) => [l.name, l.phone_norm, l.alt_phone_norm, l.email, l.stage, l.rating, l.source, l.project_name, l.budget_max, l.rep_name, l.next_due, l.created_at, l.added_by_name || l.added_via])].map((r) => r.map((v) => { v = v == null ? '' : String(v); return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v; }).join(',')).join('\n');
-      const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['﻿' + csv], { type: 'text/csv' })); a.download = `leads_${today()}.csv`; a.click(); toast(`${data.length} leads exported`, 'ok'); return; }
+      saveTextFile(`leads_${today()}.csv`, '﻿' + csv); toast(`${data.length} leads exported`, 'ok'); return; }
     if (act === 'delete') deleteLeads(ids, () => { selected.clear(); load(); });
   });
   // board drag & drop
@@ -319,8 +319,9 @@ function importModal(done) {
   const m = modal({ title: 'Import leads', xl: true, body: `<div id="imp1">
       <p class="muted">Upload an <b>Excel</b> (.xlsx / .xls), <b>CSV / TSV / text</b> or text-based <b>PDF</b> list — any column order, with or without a header row. Only a <b>phone number</b> is needed; empty or "N/A" cells are fine. If a client has <b>two numbers</b>, put them in two columns (e.g. <i>Phone</i> and <i>Alternate number</i>) or in one cell separated by <b>/</b> — both are saved. ${isAdmin() ? '' : '<br>These leads will be added to <b>your</b> list.'} You'll check the column mapping and a preview before anything is added.</p>
       <div class="frm-g">${fld('Default lead source', sel('def', S.meta.sources, 'Other'), 'Used for rows that have no source')}${fld('File', '<input type="file" id="ifile" accept=".csv,.xlsx,.xls,.pdf,text/csv,application/pdf">')}</div>
-      <a href="data:text/csv;charset=utf-8,${encodeURIComponent('name,phone,alternate_phone,email,source,budget,size,facing,location,project,purpose,notes\nRamesh Kumar,9876543210,9845012345,ramesh@example.com,Facebook Ads,35 L,200,East,Shadnagar,,Investment,Called from ad\n')}" download="leads_template.csv">⬇ Download template</a><div id="ierr" class="mt"></div></div>
+      <a href="data:text/csv;charset=utf-8,${encodeURIComponent('name,phone,alternate_phone,email,source,budget,size,facing,location,project,purpose,notes\nRamesh Kumar,9876543210,9845012345,ramesh@example.com,Facebook Ads,35 L,200,East,Shadnagar,,Investment,Called from ad\n')}" download="leads_template.csv" id="itpl">⬇ Download template</a><div id="ierr" class="mt"></div></div>
       <div id="imp2" class="hidden"></div>` });
+  $('#itpl', m.el).onclick = (e) => { if (window.RPNative) { e.preventDefault(); saveTextFile('leads_template.csv', decodeURIComponent(e.currentTarget.href.split(',').slice(1).join(','))); } };
   const readFile = (f) => new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result.split(',')[1]); fr.onerror = rej; fr.readAsDataURL(f); });
   const src = () => $('[name=def]', m.el).value;
   $('#ifile', m.el).onchange = async (e) => {

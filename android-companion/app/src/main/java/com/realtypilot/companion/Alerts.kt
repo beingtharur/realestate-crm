@@ -33,6 +33,13 @@ object Alerts {
         Build.VERSION.SDK_INT < 33 || ctx.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
 
     private fun open(ctx: Context, url: String, req: Int): PendingIntent {
+        val base = Prefs.baseUrl(ctx).trimEnd('/')
+        // a link into the CRM opens inside this app (the CRM is shown in the app's own web view)
+        if (base.isNotEmpty() && url.startsWith(base)) {
+            val inApp = Intent(ctx, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                .putExtra("hash", url.substringAfter("/#", "").let { if (it.isEmpty()) "" else "#$it" })
+            return PendingIntent.getActivity(ctx, req, inApp, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        }
         val intent = Intent(if (url.startsWith("tel:")) Intent.ACTION_DIAL else Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         return PendingIntent.getActivity(ctx, req, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
     }

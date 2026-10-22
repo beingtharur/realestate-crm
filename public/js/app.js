@@ -191,7 +191,7 @@ function renderAccountMenu() {
     if (dn2) { setDensity(dn2.dataset.dn); renderAccountMenu(); return; }
     if (!b) return; m.classList.add('hidden');
     const a = b.dataset.m;
-    if (a === 'out') { try { await post('/auth/logout'); } catch { /* ignore */ } store.set('rp_token', null); S.token = ''; S.user = null; shellMounted = false; document.querySelector('.bottomnav')?.remove(); document.body.classList.remove('rep'); pollers.forEach(clearInterval); pollers = []; location.hash = '#/login'; route(); }
+    if (a === 'out') { try { await post('/auth/logout'); } catch { /* ignore */ } try { window.RPNative?.signedOut(); } catch { /* not in the app */ } store.set('rp_token', null); S.token = ''; S.user = null; shellMounted = false; document.querySelector('.bottomnav')?.remove(); document.body.classList.remove('rep'); pollers.forEach(clearInterval); pollers = []; location.hash = '#/login'; route(); }
     if (a === 'profile') profileModal();
     if (a === 'prefs') prefsModal();
     if (a === 'enquiry') { const l = fullLink(`#/enquire/${S.org.code}`); modal({ title: 'Public enquiry form', body: `<p>Share or embed this page on your website, Facebook page bio or QR code. Every submission becomes a lead (with duplicate & spam checks).</p><p><code>${esc(l)}</code></p>`, footer: `<button class="btn primary" id="cp">${ico('copy', 'sm')}Copy link</button>`, onOpen: (el2) => $('#cp', el2).onclick = () => copy(l) }); }
@@ -300,7 +300,7 @@ async function login(root, _p, q) {
   $('#f').onsubmit = async (e) => {
     e.preventDefault(); const b = $('#go'); b.classList.add('busy'); $('#e').innerHTML = '';
     try {
-      const r = await api('POST', '/auth/login', { email: $('[name=email]').value, password: $('[name=password]').value });
+      const r = await api('POST', '/auth/login', { email: $('[name=email]').value, password: $('[name=password]').value, ...(window.RPNative ? { client: 'companion', device_name: 'RealtyPilot app' } : {}) });
       S.token = r.token; store.set('rp_token', r.token); await bootstrap(); go('#/dashboard');
     } catch (err) { $('#e').innerHTML = `<div class="err" role="alert">${ico('alert', 'sm')}<span>${esc(err.message)}</span></div>`; b.classList.remove('busy'); }
   };
@@ -364,6 +364,7 @@ document.addEventListener('click', (e) => {
 
 async function bootstrap() {
   const me = await get('/auth/me'); S.user = me.user; S.org = me.org; S.settings = me.settings; S.companion = me.companion; await loadMeta(); shellMounted = false;
+  try { window.RPNative?.session(S.token, S.user.name, S.org.name); } catch { /* not in the app */ }   // the Android app picks up the sign-in from here
 }
 (async function boot() {
   applyDensity(); initUi();

@@ -1,13 +1,24 @@
-# RealtyPilot Companion (Android)
+# RealtyPilot Android app
 
-A small helper app for sales reps. It is **not** a CRM and **not** a dialer. It does one thing:
+The Android app for sales reps — **one app, one sign-in**. It shows the whole RealtyPilot CRM inside the app,
+and in the background it does the two things a browser cannot:
 
-> After you finish a normal phone call with one of your CRM leads, it reads the call's start time and
-> duration from the phone's own call log and adds it to that lead's timeline in RealtyPilot.
+1. After you finish a normal phone call with one of your CRM leads, it reads the call's start time and duration
+   from the phone's own call log and adds it to that lead's timeline.
+2. It delivers live alerts (new lead, follow-up due, visit reminders) as phone notifications.
 
 No recording, no transcription, no cloud telephony, no extra cost — calls go through the rep's normal SIM.
 
+## First use (each rep)
+
+1. Open the app and enter the company's CRM address once (e.g. `https://crm.yourcompany.com`).
+2. Sign in on the CRM page that appears — the same email and password as the website. The app picks up the sign-in itself.
+3. Allow **Call logs / Phone**, **Notifications** and (if asked) **battery** permissions, one after the other.
+4. That's it. Use the CRM as usual; tap CALL on a lead, talk, hang up — the call logs itself.
+Signing out in the CRM also signs the phone out. File uploads (KYC), the office clock-in GPS check and CSV exports all work inside the app.
+
 ## How it works
+
 
 ```
 Rep taps CALL on a lead in the web CRM ──► CRM saves a "waiting for phone" entry and opens the phone dialer
@@ -24,8 +35,9 @@ Lead timeline:  Outgoing call · Completed · Duration: 04:32
 
 ## Build and install
 
-The project **builds** (debug APK, Gradle 8.9 + Android Gradle Plugin 8.7, JDK 17, lint has warnings only) but it has
-**not been run on a real phone yet** — test it on one phone before rolling out to the team.
+Version 1.2 (the single-app version with the CRM inside) has **not been compiled or run yet** — build it, fix anything the compiler
+reports, and test it on one real phone before rolling out. (Target: Gradle 8.9 + Android Gradle Plugin 8.7, JDK 17.)
+`RealtyPilot-Companion-debug.apk` in the repo root is the OLD two-app build; replace it with a fresh one.
 
 Command-line build (what was used): with JDK 17, the Android SDK (platform 35, build-tools) and Gradle 8.9 installed,
 ```bash
@@ -40,18 +52,6 @@ Or use Android Studio:
 2. Plug in an Android phone (Android 8.0 or newer) with USB debugging on, press **Run**.
 3. For the team: **Build → Build APK(s)** and share the APK file, or use a private channel
    (managed Google Play / an MDM). See "Play Store" below.
-
-## First use (each rep)
-
-1. Open the app, enter the CRM address (e.g. `https://crm.yourcompany.com`), CRM email and password.
-   The password is used once to sign in and is **not stored** — only the sign-in token is.
-2. Allow **Call logs** and **Phone** permissions when asked.
-3. In the web CRM: avatar → **My profile** shows "📱 Linked".
-4. Turn off battery optimisation for the app on Xiaomi / Oppo / Vivo / Realme / Samsung phones
-   (Settings → Apps → RealtyPilot Companion → Battery → Unrestricted), otherwise sync can be delayed.
-
-Testing against a CRM on your laptop: use a **debug** build and the laptop's LAN address,
-e.g. `http://192.168.1.10:3100` (debug builds allow `http://`; release builds require `https://`).
 
 ## What Android does and does not allow
 

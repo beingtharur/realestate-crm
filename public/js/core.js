@@ -34,7 +34,7 @@ export async function api(method, path, body) {
   const ct = res.headers.get('content-type') || '';
   const data = ct.includes('json') ? await res.json().catch(() => ({})) : await res.text();
   if (!res.ok) {
-    if (res.status === 401 && S.token) { S.token = ''; store.set('rp_token', null); location.hash = '#/login'; location.reload(); }
+    if (res.status === 401 && S.token) { S.token = ''; store.set('rp_token', null); try { window.RPNative?.signedOut(); } catch { /* not in the app */ } location.hash = '#/login'; location.reload(); }
     const msg = res.status >= 500 ? 'Something went wrong on our side. Please try again in a moment.' : (data && data.error) || FRIENDLY[res.status] || 'That did not work. Please try again.';
     const e = new Error(msg); e.status = res.status; e.data = data; throw e;
   }
@@ -95,6 +95,16 @@ export function dayHeading(iso) {
   return fmtDate(iso);
 }
 export const istDay = (iso) => new Date(new Date(iso).getTime() + 330 * 60000).toISOString().slice(0, 10);
+/** True when the CRM is running inside the Android app (it exposes window.RPNative). */
+export const inApp = () => !!window.RPNative;
+/** Save a text file the page built in memory: the app saves it to Downloads, a browser downloads it. */
+export function saveTextFile(name, text, mime = 'text/csv') {
+  if (window.RPNative?.saveFile) {
+    const bytes = new TextEncoder().encode(text); let bin = ''; bytes.forEach((b) => { bin += String.fromCharCode(b); });
+    window.RPNative.saveFile(name, mime, btoa(bin)); return;
+  }
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type: mime })); a.download = name; a.click();
+}
 export const phoneFmt = (p) => (p && p.length === 10 ? `+91 ${p.slice(0, 5)} ${p.slice(5)}` : p || '');
 export const dtLocal = (iso) => { const d = iso ? new Date(iso) : new Date(); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16); };
 export const fromDT = (v) => (v ? new Date(v).toISOString() : '');
