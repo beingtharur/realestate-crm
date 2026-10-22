@@ -326,3 +326,53 @@ r.post('/api/ai/chat', { admin: true }, async (ctx) => {
 });
 r.get('/api/ai/history', { admin: true }, (ctx) => all('SELECT role,content,at FROM ai_messages WHERE org_id=? AND user_id=? ORDER BY id DESC LIMIT 40', ctx.oid, ctx.user.id).reverse());
 r.del('/api/ai/history', { admin: true }, (ctx) => { run('DELETE FROM ai_messages WHERE org_id=? AND user_id=?', ctx.oid, ctx.user.id); return { ok: true }; });
+
+// ----- "Aaj ka haal": the owner's one-screen morning view — a few numbers and the 3 things that most need attention -----
+r.get('/api/briefing', { admin: true }, (ctx) => {
+  const oid = ctx.oid, today = L.istDate(), td = L.dayRange(today), yd = L.dayRange(L.istDate(Date.now() - 864e5));
+  const count = (sql, ...a) => get(sql, ...a).c;
+  const calls = (rg) => get("SELECT COUNT(*) c, SUM(CASE WHEN outcome='Connected' THEN 1 ELSE 0 END) ok FROM activities WHERE org_id=? AND type='call' AND COALESCE(outcome,'')<>'Initiated' AND created_at>=? AND created_at<?", oid, rg.from, rg.to);
+  const leadsIn = (rg) => count('SELECT COUNT(*) c FROM leads WHERE org_id=? AND created_at>=? AND created_at<?', oid, rg.from, rg.to);
+  const c1 = calls(td), c0 = calls(yd);
+  const sales = get("SELECT COUNT(*) c, COALESCE(SUM(total),0) v FROM bookings WHERE org_id=? AND status<>'cancelled' AND booked_on=?", oid, today);
+  const collected = get("SELECT COALESCE(SUM(amount),0) s FROM payments WHERE org_id=? AND kind='receipt' AND voided=0 AND paid_on=?", oid, today).s;
+  const nowIso = now();
+  const numbers = {
+    new_leads: leadsIn(td), new_leads_yesterday: leadsIn(yd),
+    calls: c1.c, calls_yesterday: c0.c, connected: c1.ok || 0,
+    overdue_followups: count("SELECT COUNT(*) c FROM tasks WHERE org_id=? AND status='open' AND due_at<?", oid, nowIso),
+    visits_today: count("SELECT COUNT(*) c FROM visits WHERE org_id=? AND status='scheduled' AND scheduled_at>=? AND scheduled_at<?", oid, td.from, td.to),
+    bookings_today: sales.c, sales_today: sales.v, collected_today: collected,
+  };
+
+  // per rep: calls today, untouched open leads, clocked in?
+  const reps = all("SELECT * FROM users WHERE org_id=? AND role='rep' AND status='active' ORDER BY name", oid).map((u) => {
+    const h = L.repHealth(oid, u);
+    const c = get("SELECT COUNT(*) c FROM activities WHERE org_id=? AND user_id=? AND type='call' AND COALESCE(outcome,'')<>'Initiated' AND created_at>=? AND created_at<?", oid, u.id, td.from, td.to).c;
+    const att = get('SELECT clock_in FROM attendance WHERE user_id=? AND date=?', u.id, today);
+    return { id: u.id, name: u.name, calls: c, open_leads: h.open_leads, untouched: h.untouched, clocked_in: !!att?.clock_in, status: h.status };
+  }).sort((a, b) => b.calls - a.calls);
+
+  // candidate alerts, each with a severity; the three highest are shown
+  const A = [];
+  const add = (sev, key, title, detail, href) => A.push({ sev, key, title, detail, href });
+  const waiting = all("SELECT l.id,l.name,l.created_at FROM leads l WHERE l.org_id=? AND l.stage='New' AND l.last_activity_at IS NULL AND l.flag_status<>'spam' AND l.created_at<? ORDER BY l.created_at LIMIT 50", oid, addMs(-3600e3));
+  if (waiting.length) add(95, 'uncontacted', `${waiting.length} new lead${waiting.length > 1 ? 's' : ''} not called yet`, `Oldest has been waiting ${Math.max(1, Math.round((Date.now() - Date.parse(waiting[0].created_at)) / 3.6e6))}h — ${waiting[0].name}`, '#/leads?uncontacted=1');
+  const unassigned = count("SELECT COUNT(*) c FROM leads WHERE org_id=? AND assigned_to IS NULL AND stage NOT IN ('Booked','Lost') AND flag_status<>'spam'", oid);
+  if (unassigned) add(90, 'unassigned', `${unassigned} lead${unassigned > 1 ? 's have' : ' has'} no rep`, 'Nobody is working these — assign them from the Leads page', '#/leads?tab=unassigned');
+  const cold = count("SELECT COUNT(*) c FROM leads WHERE org_id=? AND rating='Hot' AND stage NOT IN ('Booked','Lost') AND COALESCE(last_activity_at,created_at)<?", oid, addMs(-48 * 3600e3));
+  if (cold) add(85, 'cooling', `${cold} hot lead${cold > 1 ? 's are' : ' is'} going cold`, 'No call or note for 48+ hours', '#/leads?cooling=1');
+  const overdue = get("SELECT COALESCE(SUM(i.amount-i.paid_amount),0) s, COUNT(DISTINCT i.booking_id) n FROM installments i JOIN bookings b ON b.id=i.booking_id WHERE i.org_id=? AND b.status<>'cancelled' AND i.paid_amount<i.amount-0.5 AND i.due_date<?", oid, today);
+  if (overdue.n) add(80, 'payments', `${money(overdue.s)} overdue from ${overdue.n} booking${overdue.n > 1 ? 's' : ''}`, 'Installments past their due date', '#/collections');
+  if (numbers.overdue_followups) add(70, 'followups', `${numbers.overdue_followups} follow-up${numbers.overdue_followups > 1 ? 's are' : ' is'} overdue`, 'Open tasks past their due time', '#/tasks?bucket=overdue');
+  const hr = new Date(Date.now() + 330 * 60000).getUTCHours();
+  const idle = reps.filter((x) => x.open_leads > 0 && x.calls === 0);
+  if (idle.length && hr >= 11) add(75, 'idle', `${idle.length} rep${idle.length > 1 ? 's have' : ' has'} made no calls today`, idle.slice(0, 3).map((x) => x.name).join(', ') + (idle.length > 3 ? '…' : ''), '#/team');
+  const disc = count("SELECT COUNT(*) c FROM discount_requests WHERE org_id=? AND status='pending'", oid);
+  if (disc) add(60, 'discounts', `${disc} discount request${disc > 1 ? 's' : ''} waiting for you`, 'Reps cannot book at the discount until you decide', '#/discounts');
+  const tpl = count("SELECT COUNT(*) c FROM templates WHERE org_id=? AND share_status='pending'", oid);
+  if (tpl) add(40, 'templates', `${tpl} message template${tpl > 1 ? 's' : ''} to approve`, 'Reps asked to share them with the team', '#/comms?tab=templates');
+  if (numbers.visits_today) add(50, 'visits', `${numbers.visits_today} site visit${numbers.visits_today > 1 ? 's' : ''} today`, 'Make sure a rep is assigned to each', '#/visits?when=today');
+  const alerts = A.sort((a, b) => b.sev - a.sev).slice(0, 3).map(({ sev, ...x }) => x);
+  return { date: today, name: ctx.user.name, numbers, alerts, reps };
+});

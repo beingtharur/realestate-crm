@@ -215,6 +215,11 @@ const RVtoken = () => 'not-a-real-token';
   x = await call('GET', `/api/plots/${p2.id}/price`, null, A); ok(x.body.plot.status === 'available', 'cancelled booking releases plot', x.body.plot.status);
   x = await call('DELETE', `/api/leads/${L3}`, null, A); ok(x.status === 400, 'leads with booking history cannot be deleted');
 
+  section('Aaj ka haal');
+  x = await call('GET', '/api/briefing', null, A); ok(x.status === 200 && x.body.numbers && Array.isArray(x.body.alerts) && x.body.alerts.length <= 3 && Array.isArray(x.body.reps), 'owner briefing: numbers, at most 3 alerts, rep list', x.body);
+  ok(x.body.alerts.every((a) => a.title && a.href), 'every alert has a title and a link');
+  x = await call('GET', '/api/briefing', null, R); ok(x.status === 403, 'reps cannot open the owner briefing');
+
   section('Import');
   const leadsCsv = 'Lead list for October,,,,\nName,Mobile,Email,Source,Budget\nAnil,9111111111,,google ads,35 L\nAnil Dup,+91 91111-11111,,Google Ads,\nBad,123,,,\nKiran Again,9876500001,,,\n,,,,\n';
   x = await call('POST', '/api/leads/import/preview', { file_base64: Buffer.from(leadsCsv).toString('base64'), filename: 'l.csv', default_source: 'Newspaper / Hoarding' }, A);

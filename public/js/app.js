@@ -14,6 +14,7 @@ import { prefsModal } from './v_prefs.js';
 // ---------- navigation: grouped, role-aware ----------
 const NAV = [
   { sec: 'Workspace' },
+  { to: '/today', icon: 'zap', t: 'Aaj ka haal', admin: true },
   { to: '/dashboard', icon: 'home', t: 'Dashboard' },
   { to: '/leads', icon: 'users', t: 'Leads', children: [
     { to: '/leads', t: 'All leads', exact: true }, { to: '/leads?stage=New', t: 'New leads' }, { to: '/tasks', t: 'Follow-ups', id: 'tasks' },
@@ -42,7 +43,7 @@ const ROUTES = [
   ['/login', login, { public: true }], ['/setup', setup, { public: true }], ['/forgot', forgot, { public: true }],
   ['/reset/:token', resetPage, { public: true }], ['/invite/:token', invitePage, { public: true }],
   ['/portal/:token', pub.portal, { public: true }], ['/enquire/:code', pub.enquire, { public: true }],
-  ['/dashboard', dashboard.render, { skel: 'dashboard' }], ['/leads', leads.list, { skel: 'list' }], ['/leads/:id', leads.detail, { skel: 'detail' }],
+  ['/today', dashboard.today, { admin: true, skel: 'list' }], ['/dashboard', dashboard.render, { skel: 'dashboard' }], ['/leads', leads.list, { skel: 'list' }], ['/leads/:id', leads.detail, { skel: 'detail' }],
   ['/inventory', inventory.projects, { skel: 'cards' }], ['/inventory/:id', inventory.project, { skel: 'detail' }],
   ['/bookings', bookings.list, { skel: 'list' }], ['/bookings/:id', bookings.detail, { skel: 'detail' }], ['/collections', bookings.collections, { admin: true, skel: 'list' }], ['/discounts', bookings.discounts, { admin: true, skel: 'list' }],
   ['/tasks', work.tasks, { skel: 'list' }], ['/visits', work.visits, { skel: 'list' }], ['/comms', work.comms, { skel: 'list' }], ['/router', work.router, { admin: true, skel: 'list' }],
@@ -63,7 +64,7 @@ window.rpGo = go;
 async function route() {
   if (cleanup) { try { cleanup(); } catch { /* ignore */ } cleanup = null; }
   const { path, query } = parseHash();
-  if (path === '/') return go(S.user ? '#/dashboard' : '#/login');
+  if (path === '/') return go(S.user ? (isAdmin() ? '#/today' : '#/dashboard') : '#/login');
   const hit = compiled.map((r) => ({ r, m: r.re.exec(path) })).find((x) => x.m);
   if (!hit) { if (S.user) { renderShell(path); $('#view').innerHTML = empty('Page not found', "That page doesn't exist or has moved.", '<a class="btn primary" href="#/dashboard">Go to dashboard</a>', 'search'); } else go('#/login'); return; }
   const params = {}; hit.r.keys.forEach((k, i) => (params[k] = decodeURIComponent(hit.m[i + 1])));
@@ -301,7 +302,7 @@ async function login(root, _p, q) {
     e.preventDefault(); const b = $('#go'); b.classList.add('busy'); $('#e').innerHTML = '';
     try {
       const r = await api('POST', '/auth/login', { email: $('[name=email]').value, password: $('[name=password]').value, ...(window.RPNative ? { client: 'companion', device_name: 'RealtyPilot app' } : {}) });
-      S.token = r.token; store.set('rp_token', r.token); await bootstrap(); go('#/dashboard');
+      S.token = r.token; store.set('rp_token', r.token); await bootstrap(); go(isAdmin() ? '#/today' : '#/dashboard');
     } catch (err) { $('#e').innerHTML = `<div class="err" role="alert">${ico('alert', 'sm')}<span>${esc(err.message)}</span></div>`; b.classList.remove('busy'); }
   };
 }

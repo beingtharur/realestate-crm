@@ -496,3 +496,16 @@ body.nav-collapsed .side-foot .navbtn{justify-content:center;padding:0}
 .dayhead{text-align:center;margin:var(--s3) 0 var(--s1)}
 .actfeed{list-style:none;margin:0;padding:0}.actfeed li{display:flex;gap:var(--s3);padding:10px 0;border-bottom:1px solid var(--border)}.actfeed li:last-child{border-bottom:0}
 .actfeed .t{font-size:var(--fs-xs);color:var(--text-3);white-space:nowrap;min-width:64px}
+
+/* Aaj ka haal */
+.tsec{font-size:var(--fs-sm);color:var(--text-3);text-transform:uppercase;letter-spacing:.05em;margin:var(--s5) 0 var(--s2)}
+.talerts{display:flex;flex-direction:column;gap:var(--s2)}
+.talert{display:flex;align-items:center;gap:var(--s3);width:100%;text-align:left;background:var(--surface);border:1px solid var(--border);border-left:4px solid var(--slate);border-radius:var(--r-lg);padding:var(--s3) var(--s4);box-shadow:var(--sh-1);cursor:pointer;font:inherit;color:var(--text)}
+.talert.red{border-left-color:var(--red)}.talert.amber{border-left-color:var(--amber)}.talert.ok{border-left-color:var(--green);cursor:default}
+.talert .num{display:flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:99px;background:var(--surface-2);font-weight:700;flex:none}
+.talert .tx{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}.talert .tx b{font-size:var(--fs-md,1rem)}.talert .tx span{font-size:var(--fs-sm);color:var(--text-3)}
+.tgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--s3)}
+.tstat{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:var(--s3) var(--s4);box-shadow:var(--sh-1)}
+.tstat[data-href]{cursor:pointer}.tstat .l{font-size:var(--fs-xs);color:var(--text-3)}.tstat .v{font-size:1.9rem;font-weight:700;line-height:1.2}.tstat .x{font-size:var(--fs-xs);color:var(--text-3)}
+.dl.up{color:var(--green)}.dl.down{color:var(--red)}
+@media(max-width:640px){.tgrid{grid-template-columns:repeat(2,minmax(0,1fr))}}

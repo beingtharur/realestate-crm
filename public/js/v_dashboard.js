@@ -95,3 +95,29 @@ export async function render(root, _p, q) {
   });
   $('#addlead').onclick = () => leadForm(null, () => reload());
 }
+
+// ================= Aaj ka haal: the owner's one-screen morning view =================
+export async function today(root) {
+  const draw = async () => {
+    const d = await get('/briefing'), n = d.numbers;
+    const hr = new Date().getHours(), first = (d.name || '').split(' ')[0];
+    const delta = (a, b) => (a === b ? '' : `<span class="dl ${a > b ? 'up' : 'down'}">${a > b ? '▲' : '▼'} ${Math.abs(a - b)} vs yesterday</span>`);
+    const stat = (label, val, extra = '', href = '') => `<div class="tstat" ${href ? `data-href="${href}" role="button" tabindex="0"` : ''}><div class="l">${label}</div><div class="v">${val}</div>${extra ? `<div class="x">${extra}</div>` : ''}</div>`;
+    const sev = ['red', 'red', 'amber'];
+    const alerts = d.alerts.length
+      ? d.alerts.map((a, i) => `<button class="talert ${sev[i]}" data-href="${a.href}"><span class="num">${i + 1}</span><span class="tx"><b>${esc(a.title)}</b><span>${esc(a.detail)}</span></span><span class="go">${ico('chevRight', 'sm')}</span></button>`).join('')
+      : `<div class="talert ok"><span class="num">${ico('check', 'sm')}</span><span class="tx"><b>Sab theek hai</b><span>Nothing needs your attention right now.</span></span></div>`;
+    const reps = d.reps.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Rep</th><th class="r">Calls today</th><th class="r">Leads not touched 48h</th><th>Clock-in</th></tr></thead><tbody>${d.reps.map((x) => `<tr class="click" data-href="#/team?rep=${x.id}"><td><b>${esc(x.name)}</b></td><td class="r ${x.calls ? '' : 'bad'}">${x.calls}</td><td class="r ${x.untouched ? 'bad' : ''}">${x.untouched}</td><td>${x.clocked_in ? badge('In', 'b-green') : '<span class="dim">—</span>'}</td></tr>`).join('')}</tbody></table></div>` : empty('No reps yet', 'Invite your team from Team & targets.', '', 'users');
+    root.innerHTML = `<div class="ph1"><div><h1>Aaj ka haal</h1><p>${hr < 12 ? 'Good morning' : hr < 17 ? 'Good afternoon' : 'Good evening'}, ${esc(first)} · ${new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'Asia/Kolkata' })}</p></div><button class="btn" id="trf">${ico('refresh', 'sm')}Refresh</button></div>
+      <h3 class="tsec">Needs you now</h3><div class="talerts">${alerts}</div>
+      <h3 class="tsec">Today so far</h3>
+      <div class="tgrid">${stat('New leads', n.new_leads, delta(n.new_leads, n.new_leads_yesterday), '#/leads?stage=New')}${stat('Calls made', n.calls, delta(n.calls, n.calls_yesterday), '#/comms')}${stat('Calls connected', n.connected, n.calls ? `${Math.round((n.connected / n.calls) * 100)}% of calls` : '')}
+        ${stat('Overdue follow-ups', n.overdue_followups, '', '#/tasks?bucket=overdue')}${stat('Site visits', n.visits_today, '', '#/visits?when=today')}${stat('Bookings', n.bookings_today, n.sales_today ? inrShort(n.sales_today) : '', '#/bookings')}</div>
+      ${n.collected_today ? `<p class="small muted mt">Collected today: <b>${inr(n.collected_today)}</b></p>` : ''}
+      <h3 class="tsec">Your team today</h3>${reps}
+      <p class="small dim mt center"><a href="#/dashboard">Full dashboard →</a></p>`;
+    $('#trf', root).onclick = () => draw();
+    on(root, 'click', '[data-href]', (el) => nav(el.dataset.href));
+  };
+  await draw();
+}
