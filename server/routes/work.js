@@ -255,14 +255,39 @@ r.post('/api/templates', (ctx) => {
 });
 r.put('/api/templates/:id', (ctx) => {
   const b = ctx.body, t = tplFor(ctx, ctx.params.id);
+  // a rep editing a template the team already shares sends it back for approval, so approved wording can't change silently
+  if (!ctx.isAdmin && t.share_status === 'shared') run("UPDATE templates SET share_status='pending' WHERE id=?", t.id);
   run('UPDATE templates SET name=?, body=?, stage=?, link=? WHERE id=?', str(b.name) || t.name, str(b.body) || t.body, 'stage' in b ? tplStage(b.stage) : t.stage, 'link' in b ? tplLinks(b.link) : t.link, t.id);
   return { ok: true };
+});
+/** Rep asks to share a private template with the team (admin approves); an admin's own request shares at once. */
+r.post('/api/templates/:id/share', (ctx) => {
+  const t = tplFor(ctx, ctx.params.id);
+  if (!t.created_by) throw bad('This template is already shared');
+  if (ctx.isAdmin) { run("UPDATE templates SET share_status='shared' WHERE id=?", t.id); return { status: 'shared' }; }
+  run("UPDATE templates SET share_status='pending' WHERE id=?", t.id);
+  L.notifyAdmins(ctx.oid, 'Template waiting for approval', `${ctx.user.name} wants to share the template "${t.name}" with the team`, '#/comms?tab=templates');
+  return { status: 'pending' };
+});
+r.post('/api/templates/:id/unshare', (ctx) => {
+  const t = tplFor(ctx, ctx.params.id);
+  if (!t.created_by) throw bad('This is a shared admin template — edit or delete it instead');
+  run('UPDATE templates SET share_status=NULL WHERE id=?', t.id);
+  return { status: 'private' };
+});
+r.post('/api/templates/:id/review', { admin: true }, (ctx) => {
+  const t = tplFor(ctx, ctx.params.id);
+  if (t.share_status !== 'pending') throw bad('This template is not waiting for approval');
+  const yes = !!ctx.body.approve;
+  run('UPDATE templates SET share_status=? WHERE id=?', yes ? 'shared' : null, t.id);
+  L.notify(ctx.oid, { user: t.created_by, title: yes ? 'Template approved' : 'Template not shared', message: yes ? `"${t.name}" is now available to the whole team` : `"${t.name}" was not approved for sharing and stays private to you`, link: '#/comms?tab=templates' });
+  return { status: yes ? 'shared' : 'private' };
 });
 r.del('/api/templates/:id', (ctx) => { const t = tplFor(ctx, ctx.params.id); run('DELETE FROM templates WHERE id=?', t.id); return { ok: true }; });
 /** Fill {name} {rep} {company} {project} {project_part} {size} {phone} in a template for one lead. */
 r.post('/api/templates/render', (ctx) => {
   const l = leadFor(ctx, ctx.body.lead_id);
-  const tpl = get('SELECT * FROM templates WHERE id=? AND org_id=? AND (created_by IS NULL OR created_by=? OR ?)', Number(ctx.body.template_id), ctx.oid, ctx.user.id, ctx.isAdmin ? 1 : 0);
+  const tpl = get('SELECT * FROM templates WHERE id=? AND org_id=? AND (created_by IS NULL OR created_by=? OR share_status=\'shared\' OR ?)', Number(ctx.body.template_id), ctx.oid, ctx.user.id, ctx.isAdmin ? 1 : 0);
   if (!tpl) throw notFound('Template not found');
   const pr = l.pref_project_id ? get('SELECT name FROM projects WHERE id=?', l.pref_project_id) : null;
   const vars = { name: l.name.split(' ')[0], full_name: l.name, rep: ctx.user.name, company: L.getOrg(ctx.oid).name, project: pr?.name || 'our project', project_part: pr ? ` at ${pr.name}` : '',

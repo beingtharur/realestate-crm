@@ -216,6 +216,8 @@ const MIGRATIONS = [
   `),
   // 5: message templates a rep adds for themselves (created_by = that rep; NULL = shared by the admin with everyone)
   (d) => d.exec("ALTER TABLE templates ADD COLUMN created_by INTEGER"),
+  // 6: a rep can ask for a private template to be shared with the team: private (NULL) → pending → shared (admin approves)
+  (d) => d.exec("ALTER TABLE templates ADD COLUMN share_status TEXT"),
 ];
 for (let v = db.prepare('PRAGMA user_version').get().user_version; v < MIGRATIONS.length; v++) {
   MIGRATIONS[v](db);
