@@ -214,6 +214,8 @@ const MIGRATIONS = [
     CREATE INDEX IF NOT EXISTS ix_leads_alt ON leads(org_id, alt_phone_norm);
     UPDATE leads SET added_via=CASE WHEN created_by IS NULL THEN 'intake' ELSE 'manual' END;
   `),
+  // 5: message templates a rep adds for themselves (created_by = that rep; NULL = shared by the admin with everyone)
+  (d) => d.exec("ALTER TABLE templates ADD COLUMN created_by INTEGER"),
 ];
 for (let v = db.prepare('PRAGMA user_version').get().user_version; v < MIGRATIONS.length; v++) {
   MIGRATIONS[v](db);

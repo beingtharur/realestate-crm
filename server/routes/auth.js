@@ -157,7 +157,7 @@ r.get('/api/meta', (ctx) => ({
   projects: all(`SELECT id,name,city,location,status${ctx.isAdmin ? ',max_discount_pct' : ''} FROM projects WHERE org_id=? ORDER BY name`, ctx.oid),
   partners: all('SELECT id,name,type,commission_pct,active FROM partners WHERE org_id=? ORDER BY name', ctx.oid),
   custom_fields: all('SELECT * FROM custom_fields WHERE org_id=? ORDER BY position,id', ctx.oid).map((f) => ({ ...f, options: JSON.parse(f.options || '[]') })),
-  templates: all('SELECT * FROM templates WHERE org_id=? ORDER BY id', ctx.oid),
+  templates: L.templatesFor(ctx.oid, ctx.user),
 }));
 
 // ----- settings (admin) -----

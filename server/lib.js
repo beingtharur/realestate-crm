@@ -527,7 +527,11 @@ function recordCall(oid, actor, lead, c) {
   return id;
 }
 
+/** Templates a user can use: everything the admin shared, plus their own. Admins see all, with the owner's name. */
+const templatesFor = (oid, user) => all(`SELECT t.*, u.name AS owner_name FROM templates t LEFT JOIN users u ON u.id=t.created_by WHERE t.org_id=?${user.role === 'admin' ? '' : ' AND (t.created_by IS NULL OR t.created_by=?)'} ORDER BY t.id`,
+  ...(user.role === 'admin' ? [oid] : [oid, user.id]));
 module.exports = {
+  templatesFor,
   HttpError, bad, forbidden, notFound, STAGES, OPEN_STAGES, LOST_REASONS, SOURCES, now, addMs, sha, newToken, hashPw, checkPw, hit,
   round, num, str, normPhone, fmtPhone, period, dayRange, istDate, haversine, parseUA, parseCsv, toCsv,
   getOrg, getSettings, saveSettings, notify, notifyAdmins, audit, logActivity, rescore, activeMember, repHealth, openLeadCount,

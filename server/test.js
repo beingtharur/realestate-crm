@@ -577,6 +577,13 @@ const RVtoken = () => 'not-a-real-token';
     // templates per stage + links; source spend in reports
     x = await call('POST', '/api/templates', { name: 'Post visit', body: 'Hi {name}, thanks for visiting {project}.', stage: 'Site Visit Completed', link: 'https://x.test/brochure.pdf\nhttps://maps.test/pin' }, A2); const tid = x.body.id;
     ok(dbm.get('SELECT stage FROM templates WHERE id=?', tid).stage === 'Site Visit Completed', 'template stored with its stage');
+    x = await call('POST', '/api/templates', { name: 'My follow-up', body: 'Hi {name}, {rep} here.' }, SI); const mine = x.body.id; ok(x.status === 200, 'rep adds a personal template', x.body);
+    x = await call('GET', '/api/templates', null, SI); ok(x.body.some((t) => t.id === mine) && x.body.some((t) => t.id === tid), 'rep sees own + shared templates');
+    x = await call('GET', '/api/templates', null, A2); ok(x.body.find((t) => t.id === mine)?.owner_name, 'admin sees the rep template with its owner');
+    x = await call('GET', '/api/templates', null, (await call('POST', '/api/auth/login', { email: 'sitarao@green.test', password: 'password123' })).body.token); ok(!x.body.some((t) => t.id === mine) || x.status !== 200, "another rep does not see a rep's private template", x.status);
+    x = await call('PUT', `/api/templates/${tid}`, { name: 'Hack' }, SI); ok(x.status === 404, 'rep cannot edit a shared template');
+    x = await call('PUT', `/api/templates/${mine}`, { name: 'Mine 2' }, SI); ok(x.status === 200, 'rep edits own template');
+    x = await call('DELETE', `/api/templates/${mine}`, null, SI); ok(x.status === 200, 'rep deletes own template');
     x = await call('POST', '/api/templates/render', { template_id: tid, lead_id: pushLead }, A2); ok(/brochure\.pdf/.test(x.body.text) && /maps\.test/.test(x.body.text), 'template links are appended to the message', x.body);
     await call('PUT', '/api/settings', { source_spend: { 'Walk-in': 30000 } }, A2);
     x = await call('GET', '/api/reports?range=all', null, A2); const wk = x.body.sources.find((s) => s.source === 'Walk-in');

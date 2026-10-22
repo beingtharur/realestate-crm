@@ -239,25 +239,30 @@ r.get('/api/comms', (ctx) => {
   sql += ' ORDER BY a.created_at DESC LIMIT 300';
   return all(sql, ...a);
 });
-r.get('/api/templates', (ctx) => all('SELECT * FROM templates WHERE org_id=? ORDER BY id', ctx.oid));
+r.get('/api/templates', (ctx) => L.templatesFor(ctx.oid, ctx.user));
 const tplStage = (v) => (v && L.STAGES.includes(v) ? v : null);
 const tplLinks = (v) => (str(v) ? String(v).split(/\r?\n/).map((x) => x.trim()).filter(Boolean).slice(0, 5).join('\n') : null);
-r.post('/api/templates', { admin: true }, (ctx) => {
+/** Admins manage the shared templates; reps add and manage their own (visible only to them). */
+function tplFor(ctx, id) {
+  const t = get('SELECT * FROM templates WHERE id=? AND org_id=?', Number(id), ctx.oid);
+  if (!t || (!ctx.isAdmin && t.created_by !== ctx.user.id)) throw notFound('Template not found');
+  return t;
+}
+r.post('/api/templates', (ctx) => {
   const name = str(ctx.body.name), body = str(ctx.body.body);
   if (!name || !body) throw bad('Template name and message are required');
-  return { id: Number(run('INSERT INTO templates(org_id,name,body,stage,link) VALUES (?,?,?,?,?)', ctx.oid, name, body, tplStage(ctx.body.stage), tplLinks(ctx.body.link)).lastInsertRowid) };
+  return { id: Number(run('INSERT INTO templates(org_id,name,body,stage,link,created_by) VALUES (?,?,?,?,?,?)', ctx.oid, name, body, tplStage(ctx.body.stage), tplLinks(ctx.body.link), ctx.isAdmin ? null : ctx.user.id).lastInsertRowid) };
 });
-r.put('/api/templates/:id', { admin: true }, (ctx) => {
-  const b = ctx.body, t = get('SELECT * FROM templates WHERE id=? AND org_id=?', Number(ctx.params.id), ctx.oid);
-  if (!t) throw notFound('Template not found');
+r.put('/api/templates/:id', (ctx) => {
+  const b = ctx.body, t = tplFor(ctx, ctx.params.id);
   run('UPDATE templates SET name=?, body=?, stage=?, link=? WHERE id=?', str(b.name) || t.name, str(b.body) || t.body, 'stage' in b ? tplStage(b.stage) : t.stage, 'link' in b ? tplLinks(b.link) : t.link, t.id);
   return { ok: true };
 });
-r.del('/api/templates/:id', { admin: true }, (ctx) => { run('DELETE FROM templates WHERE id=? AND org_id=?', ctx.params.id, ctx.oid); return { ok: true }; });
+r.del('/api/templates/:id', (ctx) => { const t = tplFor(ctx, ctx.params.id); run('DELETE FROM templates WHERE id=?', t.id); return { ok: true }; });
 /** Fill {name} {rep} {company} {project} {project_part} {size} {phone} in a template for one lead. */
 r.post('/api/templates/render', (ctx) => {
   const l = leadFor(ctx, ctx.body.lead_id);
-  const tpl = get('SELECT * FROM templates WHERE id=? AND org_id=?', Number(ctx.body.template_id), ctx.oid);
+  const tpl = get('SELECT * FROM templates WHERE id=? AND org_id=? AND (created_by IS NULL OR created_by=? OR ?)', Number(ctx.body.template_id), ctx.oid, ctx.user.id, ctx.isAdmin ? 1 : 0);
   if (!tpl) throw notFound('Template not found');
   const pr = l.pref_project_id ? get('SELECT name FROM projects WHERE id=?', l.pref_project_id) : null;
   const vars = { name: l.name.split(' ')[0], full_name: l.name, rep: ctx.user.name, company: L.getOrg(ctx.oid).name, project: pr?.name || 'our project', project_part: pr ? ` at ${pr.name}` : '',
