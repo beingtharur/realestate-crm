@@ -15,7 +15,7 @@ export function leadForm(lead, onDone, preset = {}) {
   const body = `<div id="dupwarn"></div>
     ${sec(1, 'Contact')}<div class="frm-g">
     ${fld('Name <span class="req">*</span>', inp('name', l.name || '', 'required placeholder="Full name" autocomplete="off"'))}${fld('Mobile <span class="req">*</span>', inp('phone', l.phone_norm || l.phone || '', 'required data-v="phone" inputmode="tel" placeholder="98765 43210" autocomplete="off"'), '10-digit Indian mobile; +91 is optional')}
-    ${fld('Second mobile', inp('alt_phone', l.alt_phone_norm || l.alt_phone || '', 'data-v="phone" inputmode="tel" placeholder="Optional — another number for this client"'), 'Calls from this number are matched to the lead too')}
+    ${fld('Second mobile', inp('alt_phone', l.alt_phone_norm || l.alt_phone || '', 'data-v="phone" inputmode="tel" placeholder="Optional"'), 'Calls from this number are matched to the lead too')}
     ${fld('Email', inp('email', l.email || '', 'type="email" data-v="email" placeholder="name@example.com"'))}${fld('Buying purpose', sel('purpose', [['', 'Not sure'], 'Investment', 'Self-use / build home', 'Both'], l.purpose || ''))}</div>
     ${sec(2, 'What they are looking for', 'optional')}<div class="frm-g">
     ${fld('Budget from (₹)', inp('budget_min', l.budget_min ?? '', 'type="number" min="0" placeholder="e.g. 2500000"'))}${fld('Budget up to (₹)', inp('budget_max', l.budget_max ?? '', 'type="number" min="0" placeholder="e.g. 4000000"'))}

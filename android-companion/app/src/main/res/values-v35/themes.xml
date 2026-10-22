@@ -1,0 +1,7 @@
+<resources>
+    <!-- Android 15 forces apps edge-to-edge, which stops the keyboard from resizing the CRM page and hides inputs behind it.
+         Opt out so the web view keeps sitting between the status bar and the navigation bar, and shrinks above the keyboard. -->
+    <style name="AppTheme" parent="@android:style/Theme.DeviceDefault.Light.NoActionBar">
+        <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>
+    </style>
+</resources>

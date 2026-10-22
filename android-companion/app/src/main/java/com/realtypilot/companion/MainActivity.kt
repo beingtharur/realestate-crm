@@ -92,6 +92,9 @@ class MainActivity : Activity() {
         web.settings.apply {
             javaScriptEnabled = true; domStorageEnabled = true
             allowFileAccess = false; allowContentAccess = true
+            // lay the page out at the phone's real width (the CRM's viewport tag does the rest) and never let a double-tap zoom it
+            useWideViewPort = true; loadWithOverviewMode = false
+            setSupportZoom(false); builtInZoomControls = false; displayZoomControls = false
             setGeolocationEnabled(true)
             userAgentString = "$userAgentString RealtyPilotApp/1.2"
         }
