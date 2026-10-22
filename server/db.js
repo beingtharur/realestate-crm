@@ -205,6 +205,15 @@ const MIGRATIONS = [
     ALTER TABLE templates ADD COLUMN link TEXT;
     UPDATE leads SET assigned_at=COALESCE(created_at, updated_at) WHERE assigned_to IS NOT NULL;
   `),
+  // 4: second phone number per lead, how a lead was added (manual / import / website…) and which import batch it came from
+  (d) => d.exec(`
+    ALTER TABLE leads ADD COLUMN alt_phone TEXT;
+    ALTER TABLE leads ADD COLUMN alt_phone_norm TEXT;
+    ALTER TABLE leads ADD COLUMN added_via TEXT;
+    ALTER TABLE leads ADD COLUMN import_batch TEXT;
+    CREATE INDEX IF NOT EXISTS ix_leads_alt ON leads(org_id, alt_phone_norm);
+    UPDATE leads SET added_via=CASE WHEN created_by IS NULL THEN 'intake' ELSE 'manual' END;
+  `),
 ];
 for (let v = db.prepare('PRAGMA user_version').get().user_version; v < MIGRATIONS.length; v++) {
   MIGRATIONS[v](db);

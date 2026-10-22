@@ -179,6 +179,24 @@ r.get('/api/team/:id/activity', (ctx) => {
   };
 });
 
+/** Everything a rep did, newest first — calls, notes, stage changes, leads added, bulk imports — for the "My activity" page. */
+r.get('/api/team/:id/feed', (ctx) => {
+  const id = Number(ctx.params.id);
+  if (!ctx.isAdmin && id !== ctx.user.id) throw forbidden();
+  member(ctx.oid, id);
+  const days = Math.min(Math.max(Number(ctx.query.days) || 14, 1), 90), since = L.addMs(-days * 864e5);
+  const acts = all(`SELECT a.id,a.type,a.direction,a.outcome,a.duration,a.content,a.created_at,a.lead_id,l.name AS lead_name FROM activities a LEFT JOIN leads l ON l.id=a.lead_id
+    WHERE a.org_id=? AND a.user_id=? AND a.created_at>=? AND NOT (a.type='system' AND a.content LIKE 'Lead imported%') AND COALESCE(a.outcome,'')<>'Initiated' ORDER BY a.created_at DESC, a.id DESC LIMIT 500`, ctx.oid, id, since)
+    .map((a) => ({ key: 'a' + a.id, at: a.created_at, type: a.type, lead_id: a.lead_id, lead_name: a.lead_name, direction: a.direction, outcome: a.outcome, duration: a.duration, text: a.content }));
+  const imports = all("SELECT id,detail,at FROM audit_log WHERE org_id=? AND user_id=? AND action='lead.import' AND at>=? ORDER BY at DESC", ctx.oid, id, since)
+    .map((x) => ({ key: 'i' + x.id, at: x.at, type: 'import', text: `Bulk import: ${x.detail}` }));
+  const tasks = all("SELECT t.id,t.title,t.completed_at AS at,t.lead_id,l.name AS lead_name FROM tasks t LEFT JOIN leads l ON l.id=t.lead_id WHERE t.org_id=? AND t.assigned_to=? AND t.status<>'open' AND t.completed_at>=? ORDER BY t.completed_at DESC LIMIT 200", ctx.oid, id, since)
+    .map((t) => ({ key: 't' + t.id, at: t.at, type: 'task', lead_id: t.lead_id, lead_name: t.lead_name, text: `Completed task: ${t.title}` }));
+  const items = [...acts, ...imports, ...tasks].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0)).slice(0, 600);
+  const leads_added = get('SELECT COUNT(*) c FROM leads WHERE org_id=? AND created_by=? AND created_at>=?', ctx.oid, id, since).c;
+  return { user_id: id, days, leads_added, items };
+});
+
 // ----- attendance -----
 const OFFICE_SHIFT_GRACE_MIN = 15;
 r.post('/api/attendance/clock-in', (ctx) => {

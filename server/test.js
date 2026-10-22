@@ -227,7 +227,26 @@ const RVtoken = () => 'not-a-real-token';
   ok(x.body.imported === 1 && x.body.skipped.length === 0, 'import commit inserts only valid rows', x.body);
   x = await call('POST', '/api/leads/import/preview', { file_base64: Buffer.from(leadsCsv).toString('base64'), filename: 'l.csv' }, A);
   ok(x.body.valid === 0 && x.body.duplicates === 3, 're-importing the same file imports nothing', { v: x.body.valid, d: x.body.duplicates });
-  x = await call('POST', '/api/leads/import/preview', { file_base64: 'x', filename: 'x.csv' }, R); ok(x.status === 403, 'rep cannot import');
+  // reps import too — but only for themselves
+  const repCsv = 'Name,Mobile,Alternate Number,Email,Assigned To\nRep Import One,9333300001,9333300002,,Someone Else\nRep Import Two,"93333 00003 / 93333 00004",,,\nRep Dup,9000000001,,,\nSame Alt,9333300005,9333300005,,\n';
+  x = await call('POST', '/api/leads/import/preview', { file_base64: Buffer.from(repCsv).toString('base64'), filename: 'rep.csv' }, R);
+  ok(x.status === 200 && x.body.valid === 3 && x.body.duplicates === 1, 'rep can preview an import', { s: x.status, v: x.body.valid, d: x.body.duplicates, e: x.body.error });
+  ok(x.body.rows[0].data.alt_phone === '9333300002' && x.body.rows[1].data.phone === '9333300003' && x.body.rows[1].data.alt_phone === '9333300004', 'both phone numbers are read (second column, or two numbers in one cell)', x.body.rows.map((r) => [r.data.phone, r.data.alt_phone]));
+  ok(x.body.rows[3].data.alt_phone === '', 'identical second number is dropped');
+  ok(!/Meena/.test(x.body.rows[2].errors[0]) && /another rep|Already in CRM/.test(x.body.rows[2].errors[0]), 'rep is not shown other reps\' lead names in import duplicates', x.body.rows[2].errors);
+  const repPrev = x.body;
+  x = await call('POST', '/api/leads/import/commit', { rows: repPrev.rows, upload_id: repPrev.upload_id }, R);
+  ok(x.status === 200 && x.body.imported === 3, 'rep import commits', x.body);
+  x = await call('GET', '/api/leads?q=Rep%20Import', null, R);
+  ok(x.body.length === 2 && x.body.every((l) => l.assigned_to === raviId && l.created_by === raviId && l.added_via === 'import' && l.added_by_name), 'imported rep leads belong to the rep and show who added them', x.body.map((l) => [l.assigned_to, l.added_by_name]));
+  x = await call('GET', '/api/leads?q=9333300004', null, A); ok(x.body.length === 1, 'search finds a lead by its second number');
+  x = await call('POST', '/api/leads/check-duplicate', { phone: '9444400000', alt_phone: '9333300002' }, A); ok(x.body.duplicates.length === 1, 'second number takes part in duplicate checks');
+  x = await call('POST', '/api/leads', { name: 'Alt Holder', phone: '9555500001', alt_phone: '9555500002', source: 'Walk-in' }, R); const altId = x.body.id; ok(x.status === 200, 'rep adds a lead with two numbers', x.body);
+  x = await call('GET', `/api/leads/${altId}`, null, R); ok(x.body.lead.alt_phone_norm === '9555500002' && x.body.lead.added_by_name, 'lead detail returns second number and who added it', x.body.lead);
+  x = await call('PATCH', `/api/leads/${altId}`, { alt_phone: '12' }, R); ok(x.status === 400, 'invalid second number is rejected');
+  x = await call('GET', `/api/team/${raviId}/feed`, null, R); ok(x.status === 200 && x.body.items.some((i) => i.type === 'import') && x.body.items.some((i) => /Alt Holder/.test(i.lead_name || '')), 'rep sees their own activity feed (import + lead added)', x.body.items.slice(0, 3));
+  x = await call('GET', `/api/team/${sitaId}/feed`, null, R); ok(x.status === 403, 'rep cannot read another rep\'s feed');
+  x = await call('POST', '/api/leads/import/preview', { file_base64: 'x', filename: 'x.csv' }, R); ok(x.status === 400, 'rep gets a normal error for a bad file');
   // Excel (.xlsx and legacy .xls) — phone stored as a number, as Excel usually does
   const XLSX = require('xlsx');
   const sheet = XLSX.utils.aoa_to_sheet([['Customer Name', 'Contact No', 'E-mail', 'Budget', 'Remarks'], ['Xl One', 9222200001, 'XL1@Example.com', '40-50 lakhs', 'wants east'], ['Xl Two', '09222200002 / 9222200003', '', '1.2 Cr', ''], ['Xl Dup', '+91 92222 00001', '', '', '']]);

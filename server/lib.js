@@ -221,10 +221,12 @@ function cleanCustom(oid, custom, enforceRequired) {
 }
 
 // ---------- duplicates / fraud ----------
-function findDuplicates(oid, phoneNorm, email, excludeId = 0) {
+/** A lead matches when its primary or second number equals either incoming number, or the email matches. */
+function findDuplicates(oid, phoneNorm, email, excludeId = 0, altNorm = null) {
   const e = email ? String(email).trim().toLowerCase() : '';
+  const p1 = phoneNorm || '__none__', p2 = altNorm || p1;
   return all(`SELECT l.id,l.name,l.phone,l.email,l.stage,l.assigned_to,u.name AS rep_name FROM leads l
-    LEFT JOIN users u ON u.id=l.assigned_to WHERE l.org_id=? AND l.id<>? AND (l.phone_norm=? OR (?<>'' AND lower(l.email)=?))`, oid, excludeId, phoneNorm || '', e, e);
+    LEFT JOIN users u ON u.id=l.assigned_to WHERE l.org_id=? AND l.id<>? AND (l.phone_norm IN (?,?) OR l.alt_phone_norm IN (?,?) OR (?<>'' AND lower(l.email)=?))`, oid, excludeId, p1, p2, p1, p2, e, e);
 }
 function checkFlags(oid, leadId, phoneNorm) {
   const l = get('SELECT * FROM leads WHERE id=? AND org_id=?', leadId, oid);
@@ -397,10 +399,13 @@ function createLead(oid, actor, d, opts = {}) {
   if (!pn) throw bad('Enter a valid Indian mobile number (10 digits, starting 6–9)');
   const email = d.email ? String(d.email).trim().toLowerCase() : null;
   if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw bad('Email format is invalid');
+  let altPn = d.alt_phone ? normPhone(d.alt_phone) : null;
+  if (d.alt_phone && !altPn && !opts.lenient) throw bad('Second mobile number is not valid');
+  if (altPn === pn) altPn = null;
   const custom = cleanCustom(oid, d.custom, !opts.lenient);
   const projectId = d.pref_project_id ? Number(d.pref_project_id) : null;
   if (projectId && !get('SELECT 1 x FROM projects WHERE id=? AND org_id=?', projectId, oid)) throw bad('Preferred project not found');
-  const dups = findDuplicates(oid, pn, email);
+  const dups = findDuplicates(oid, pn, email, 0, altPn);
   if (dups.length && opts.intake) {
     const ex = get('SELECT * FROM leads WHERE id=?', dups[0].id);
     const projName = projectId ? get('SELECT name FROM projects WHERE id=?', projectId)?.name : '';
@@ -425,15 +430,16 @@ function createLead(oid, actor, d, opts = {}) {
   let assigned = null;
   if (d.assigned_to) { if (!activeMember(oid, Number(d.assigned_to))) throw bad('Assigned rep not found'); assigned = Number(d.assigned_to); }
   else if (actor && actor.role === 'rep') assigned = actor.id;
-  const t = now();
+  const t = now(), via = opts.via || (opts.intake ? 'intake' : 'manual');
   const r = run(`INSERT INTO leads(org_id,name,phone,phone_norm,email,source,partner_id,stage,budget_min,budget_max,pref_size_min,pref_size_max,
-    pref_facing,pref_location,pref_project_id,purpose,assigned_to,notes,custom,consent,created_by,created_at,updated_at,last_activity_at,assigned_at)
-    VALUES (?,?,?,?,?,?,?,'New',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    pref_facing,pref_location,pref_project_id,purpose,assigned_to,notes,custom,consent,created_by,created_at,updated_at,last_activity_at,assigned_at,alt_phone,alt_phone_norm,added_via,import_batch)
+    VALUES (?,?,?,?,?,?,?,'New',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     oid, name, pn, pn, email, str(d.source) || 'Other', d.partner_id ? Number(d.partner_id) : null, num(d.budget_min), num(d.budget_max),
     num(d.pref_size_min), num(d.pref_size_max), str(d.pref_facing), str(d.pref_location), projectId, str(d.purpose), assigned, str(d.notes),
-    JSON.stringify(custom), d.consent === false ? 0 : 1, actor ? actor.id : null, t, t, null, assigned ? t : null);
+    JSON.stringify(custom), d.consent === false ? 0 : 1, actor ? actor.id : null, t, t, null, assigned ? t : null,
+    altPn, altPn, via, opts.batch || null);
   const id = Number(r.lastInsertRowid);
-  logActivity(oid, id, actor ? actor.id : null, 'system', { content: `Lead created${d.source ? ' via ' + d.source : ''}${actor ? ' by ' + actor.name : ''}` });
+  logActivity(oid, id, actor ? actor.id : null, 'system', { content: `Lead ${via === 'import' ? 'imported' : 'created'}${d.source ? ' via ' + d.source : ''}${actor ? ' by ' + actor.name : ''}${via === 'import' ? ' (bulk import)' : ''}` });
   logEnquiry(oid, pn, projectId, d.source);
   if (assigned) {
     if (!opts.silent && (!actor || actor.id !== assigned)) notify(oid, { user: assigned, kind: 'lead', title: 'New lead assigned', message: `${name} (${fmtPhone(pn)}) was assigned to you`, link: `#/leads/${id}`, action_url: `tel:+91${pn}`, action_label: 'Call' });

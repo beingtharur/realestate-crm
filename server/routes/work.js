@@ -185,7 +185,7 @@ r.get('/api/device/sync', (ctx) => {
   const mine = ctx.isAdmin ? '' : ' AND assigned_to=?', args = ctx.isAdmin ? [ctx.oid] : [ctx.oid, ctx.user.id];
   return {
     user: { id: ctx.user.id, name: ctx.user.name }, org: L.getOrg(ctx.oid).name, server_time: now(),
-    numbers: all(`SELECT DISTINCT phone_norm FROM leads WHERE org_id=?${mine} LIMIT 50000`, ...args).map((x) => x.phone_norm),
+    numbers: [...new Set(all(`SELECT phone_norm, alt_phone_norm FROM leads WHERE org_id=?${mine} LIMIT 50000`, ...args).flatMap((x) => [x.phone_norm, x.alt_phone_norm]).filter(Boolean))],
     pending: all(`SELECT a.id AS intent_id, a.lead_id, l.name AS lead_name, l.phone_norm AS phone, a.created_at FROM activities a JOIN leads l ON l.id=a.lead_id
       WHERE a.org_id=? AND a.user_id=? AND a.type='call' AND a.outcome=? ORDER BY a.id DESC LIMIT 30`, ctx.oid, ctx.user.id, CALL_PENDING),
   };
@@ -209,11 +209,11 @@ r.post('/api/device/calls', (ctx) => {
     // 1) the call the user started from the CRM a moment ago  2) otherwise the user's lead with this number
     let pending = null;
     if (direction === 'outgoing') {
-      pending = get(`SELECT a.* FROM activities a JOIN leads l ON l.id=a.lead_id WHERE a.org_id=? AND a.user_id=? AND a.type='call' AND a.outcome=? AND l.phone_norm=?
-        AND a.created_at>=? AND a.created_at<=? ORDER BY a.id DESC LIMIT 1`, ctx.oid, ctx.user.id, CALL_PENDING, pn, addMs(-15 * 60000, startMs), addMs(90000, startMs));
+      pending = get(`SELECT a.* FROM activities a JOIN leads l ON l.id=a.lead_id WHERE a.org_id=? AND a.user_id=? AND a.type='call' AND a.outcome=? AND (l.phone_norm=? OR l.alt_phone_norm=?)
+        AND a.created_at>=? AND a.created_at<=? ORDER BY a.id DESC LIMIT 1`, ctx.oid, ctx.user.id, CALL_PENDING, pn, pn, addMs(-15 * 60000, startMs), addMs(90000, startMs));
     }
     const lead = pending ? get('SELECT * FROM leads WHERE id=?', pending.lead_id)
-      : get(`SELECT * FROM leads WHERE org_id=? AND phone_norm=?${ctx.isAdmin ? '' : ' AND assigned_to=?'} ORDER BY (stage='Lost'), updated_at DESC LIMIT 1`, ...(ctx.isAdmin ? [ctx.oid, pn] : [ctx.oid, pn, ctx.user.id]));
+      : get(`SELECT * FROM leads WHERE org_id=? AND (phone_norm=? OR alt_phone_norm=?)${ctx.isAdmin ? '' : ' AND assigned_to=?'} ORDER BY (stage='Lost'), updated_at DESC LIMIT 1`, ...(ctx.isAdmin ? [ctx.oid, pn, pn] : [ctx.oid, pn, pn, ctx.user.id]));
     if (!lead) return out('unmatched'); // not a CRM lead of this user — nothing is stored
     const id = L.recordCall(ctx.oid, ctx.user, lead, { direction, outcome, duration, started_at: started, phone: pn, source: 'device', ext_id: ext, activity_id: pending?.id });
     out('logged', { lead_id: lead.id, activity_id: id, outcome });
@@ -286,7 +286,7 @@ r.post('/api/webhook/:code/:secret/event', { public: true }, (ctx) => {
   const e = { type, direction: b.direction === 'incoming' || b.direction === 'inbound' ? 'incoming' : 'outgoing', duration: Math.round(num(b.duration) || 0),
     outcome: type === 'call' ? (CALL_OUTCOMES.includes(b.outcome) ? b.outcome : num(b.duration) > 0 ? 'Connected' : 'Missed') : null, content: str(b.content || b.message) };
   const agent = b.agent_email ? get('SELECT id FROM users WHERE org_id=? AND lower(email)=lower(?)', org.id, b.agent_email) : null;
-  const lead = get('SELECT * FROM leads WHERE org_id=? AND phone_norm=? ORDER BY updated_at DESC', org.id, pn);
+  const lead = get('SELECT * FROM leads WHERE org_id=? AND (phone_norm=? OR alt_phone_norm=?) ORDER BY updated_at DESC', org.id, pn, pn);
   const x = run('INSERT INTO webhook_events(org_id,type,phone_norm,direction,duration,outcome,content,agent_email,payload,lead_id,matched,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
     org.id, type, pn, e.direction, e.duration, e.outcome, e.content, b.agent_email, b, lead?.id, lead ? 1 : 0, now());
   if (lead) recordEvent(org.id, e, lead.id, agent?.id || lead.assigned_to);

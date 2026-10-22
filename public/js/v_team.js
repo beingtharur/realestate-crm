@@ -1,5 +1,5 @@
 // Team & targets, rep profile + daily activity, attendance & presence, channel partners.
-import { S, statusChip, $, $$, esc, get, post, patch, put, del, on, modal, modalForm, confirmDialog, toast, fld, inp, sel, repOptions, inr, inrShort, rel, fmtDT, fmtDate, fmtTime, today,
+import { S, statusChip, $, $$, esc, get, post, patch, put, del, on, modal, modalForm, confirmDialog, toast, fld, inp, sel, repOptions, inr, inrShort, rel, fmtDT, fmtDate, fmtTime, today, dayHeading, istDay, ico,
   isAdmin, empty, badge, phoneFmt, nav, reload, authUrl, debounce, spinner, fullLink, copy, loadMeta, initials, waLink } from './core.js';
 import { availabilityModal, handOverModal } from './v_prefs.js';
 
@@ -89,6 +89,35 @@ async function profile(id, done) {
   on(m.el, 'click', '[data-pt]', (b) => show(b.dataset.pt));
   const pe = $('#pe', m.el); if (pe) pe.onclick = () => modalForm({ title: 'Edit member', body: `<div class="frm-g">${fld('Name', inp('name', u.name))}${fld('Mobile', inp('phone', u.phone || ''))}${fld('Specialization', inp('specialization', u.specialization || ''))}${fld('Monthly sales target (₹)', inp('monthly_target', u.monthly_target || '', 'type="number"'))}${fld('Monthly bookings target', inp('target_bookings', u.target_bookings || '', 'type="number"'))}</div>`, onSubmit: async (d) => { await patch('/team/' + id, d); toast('Saved', 'ok'); m.close(); done && done(); } });
   show('act');
+}
+
+// ================= my activity (rep) =================
+const FEED_ICON = { call: 'phone', whatsapp: 'message', note: 'edit', task: 'checkCircle', stage: 'refresh', visit: 'truck', booking: 'file', payment: 'rupee', assign: 'userCheck', system: 'info', import: 'upload' };
+const feedText = (a) => {
+  if (a.type === 'call') return `${a.direction === 'incoming' ? 'Incoming' : 'Outgoing'} call · ${esc(a.outcome || '')}${a.duration ? ' · ' + dur(a.duration) : ''}`;
+  if (a.type === 'whatsapp') return `WhatsApp ${a.direction === 'incoming' ? 'received' : 'sent'}${a.text ? ': ' + esc(a.text.slice(0, 80)) : ''}`;
+  return esc(a.text || a.type);
+};
+export async function myActivity(root, _p, q) {
+  const id = isAdmin() && q.rep ? Number(q.rep) : S.user.id;
+  let days = 14;
+  const draw = async () => {
+    root.innerHTML = `<div class="ph1"><div><h1>My activity</h1><p>Everything you did — calls, notes, leads you added, imports</p></div><div class="seg" id="rg">${[[1, 'Today'], [7, '7 days'], [14, '14 days'], [30, '30 days']].map(([d, l]) => `<button data-d="${d}" class="${d === days ? 'on' : ''}">${l}</button>`).join('')}</div></div>${spinner()}`;
+    $$('#rg [data-d]', root).forEach((b) => (b.onclick = () => { days = Number(b.dataset.d); draw(); }));
+    const [feed, sum] = await Promise.all([get(`/team/${id}/feed?days=${days}`), get(`/team/${id}/activity?range=${days === 1 ? 'day' : days <= 7 ? 'week' : 'month'}`)]);
+    const kpi = (l, v) => `<div class="card kpi"><div class="l">${l}</div><div class="v">${v}</div></div>`;
+    let out = '', last = '';
+    feed.items.forEach((a) => {
+      const k = istDay(a.at);
+      if (k !== last) { out += `${last ? '</ul>' : ''}<div class="dayhead" style="text-align:left"><span class="daychip">${esc(dayHeading(a.at))}</span></div><ul class="actfeed">`; last = k; }
+      out += `<li><span class="t">${fmtTime(a.at)}</span><div class="ico ${a.type}">${ico(FEED_ICON[a.type] || 'info', 'sm')}</div><div style="min-width:0;flex:1">${a.lead_id ? `<a href="#/leads/${a.lead_id}"><b>${esc(a.lead_name || 'Lead')}</b></a> · ` : ''}${feedText(a)}</div></li>`;
+    });
+    root.innerHTML = `<div class="ph1"><div><h1>My activity</h1><p>Everything you did — calls, notes, leads you added, imports</p></div><div class="seg" id="rg">${[[1, 'Today'], [7, '7 days'], [14, '14 days'], [30, '30 days']].map(([d, l]) => `<button data-d="${d}" class="${d === days ? 'on' : ''}">${l}</button>`).join('')}</div></div>
+      <div class="grid g4 keep mb">${kpi('Calls', sum.calls.total)}${kpi('Connected', sum.calls.connected)}${kpi('Leads added', feed.leads_added)}${kpi('Tasks done', sum.tasks.done)}</div>
+      <div class="card">${feed.items.length ? out + '</ul>' : empty('No activity yet', 'Calls you make, notes you write and leads you add will show up here.', '', 'clock')}</div>`;
+    $$('#rg [data-d]', root).forEach((b) => (b.onclick = () => { days = Number(b.dataset.d); draw(); }));
+  };
+  await draw();
 }
 
 // ================= attendance =================

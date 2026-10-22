@@ -12,11 +12,11 @@ function leadFor(ctx, id) {
   return l;
 }
 const parseLead = (l) => ({ ...l, custom: JSON.parse(l.custom || '{}') });
-const LIST_SQL = `SELECT l.*, u.name AS rep_name, pr.name AS project_name, pa.name AS partner_name,
+const LIST_SQL = `SELECT l.*, u.name AS rep_name, cb.name AS added_by_name, pr.name AS project_name, pa.name AS partner_name,
   (SELECT MIN(due_at) FROM tasks t WHERE t.lead_id=l.id AND t.status='open') AS next_due,
   (SELECT MAX(a.created_at) FROM activities a WHERE a.lead_id=l.id AND a.type IN ('call','whatsapp') AND COALESCE(a.outcome,'')<>'Initiated') AS last_contacted,
   (SELECT COUNT(*) FROM bookings b WHERE b.lead_id=l.id AND b.status<>'cancelled') AS booking_count
-  FROM leads l LEFT JOIN users u ON u.id=l.assigned_to LEFT JOIN projects pr ON pr.id=l.pref_project_id LEFT JOIN partners pa ON pa.id=l.partner_id WHERE l.org_id=?`;
+  FROM leads l LEFT JOIN users u ON u.id=l.assigned_to LEFT JOIN users cb ON cb.id=l.created_by LEFT JOIN projects pr ON pr.id=l.pref_project_id LEFT JOIN partners pa ON pa.id=l.partner_id WHERE l.org_id=?`;
 
 r.get('/api/leads', (ctx) => {
   const q = ctx.query; const a = [ctx.oid]; let sql = LIST_SQL;
@@ -37,7 +37,8 @@ r.get('/api/leads', (ctx) => {
   if (/^\d{4}-\d{2}-\d{2}$/.test(q.to || '')) { sql += ' AND l.created_at<?'; a.push(L.dayRange(q.to).to); }
   if (q.q) {
     const t = `%${String(q.q).trim()}%`, digits = `%${String(q.q).replace(/\D/g, '')}%`;
-    sql += ' AND (l.name LIKE ? OR l.email LIKE ? OR l.phone_norm LIKE ?)'; a.push(t, t, digits.length > 2 ? digits : '%__none__%');
+    const dg = digits.length > 2 ? digits : '%__none__%';
+    sql += ' AND (l.name LIKE ? OR l.email LIKE ? OR l.phone_norm LIKE ? OR l.alt_phone_norm LIKE ?)'; a.push(t, t, dg, dg);
   }
   sql += q.stage === 'Lost' ? ' ORDER BY l.lost_at DESC' : ' ORDER BY l.updated_at DESC';
   sql += ' LIMIT ?'; a.push(Math.min(Number(q.limit) || 1000, 3000));
@@ -68,7 +69,7 @@ r.post('/api/leads/bulk-stage', (ctx) => {
 
 r.post('/api/leads/check-duplicate', (ctx) => {
   const pn = L.normPhone(ctx.body.phone);
-  const dups = L.findDuplicates(ctx.oid, pn, ctx.body.email, Number(ctx.body.exclude_id) || 0);
+  const dups = L.findDuplicates(ctx.oid, pn, ctx.body.email, Number(ctx.body.exclude_id) || 0, L.normPhone(ctx.body.alt_phone));
   // Reps see that a duplicate exists (to avoid double work) but only names of leads that are theirs are linkable
   return { duplicates: dups.map((d) => ({ id: d.id, name: d.name, stage: d.stage, rep_name: d.rep_name, mine: ctx.isAdmin || d.assigned_to === ctx.user.id })) };
 });
@@ -90,7 +91,7 @@ r.get('/api/leads/:id', (ctx) => {
     .map((b) => (ctx.isAdmin ? { ...b, ...L.bookingSummary(ctx.oid, b.id) } : { id: b.id, booking_no: b.booking_no, status: b.status, total: b.total - 0, plot_no: b.plot_no, project_name: b.project_name, booked_on: b.booked_on }));
   return {
     lead,
-    duplicates: L.findDuplicates(ctx.oid, l.phone_norm, l.email, l.id).map((d) => ({ id: d.id, name: d.name, stage: d.stage, rep_name: d.rep_name })),
+    duplicates: L.findDuplicates(ctx.oid, l.phone_norm, l.email, l.id, l.alt_phone_norm).map((d) => ({ id: d.id, name: d.name, stage: d.stage, rep_name: d.rep_name })),
     timeline,
     tasks: all('SELECT t.*, u.name AS assignee FROM tasks t LEFT JOIN users u ON u.id=t.assigned_to WHERE t.org_id=? AND t.lead_id=? ORDER BY t.status, t.due_at', ctx.oid, l.id),
     visits: all(`SELECT v.*, pr.name AS project_name, pl.plot_no FROM visits v JOIN projects pr ON pr.id=v.project_id LEFT JOIN plots pl ON pl.id=v.plot_id WHERE v.org_id=? AND v.lead_id=? ORDER BY v.scheduled_at DESC`, ctx.oid, l.id),
@@ -109,8 +110,11 @@ r.patch('/api/leads/:id', (ctx) => {
   if ('phone' in b) { pn = L.normPhone(b.phone); if (!pn) throw bad('Enter a valid Indian mobile number'); }
   const email = 'email' in b ? (b.email ? String(b.email).trim().toLowerCase() : null) : l.email;
   if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw bad('Email format is invalid');
-  if ((pn !== l.phone_norm || email !== l.email) && !b.force) {
-    const dups = L.findDuplicates(ctx.oid, pn, email, l.id);
+  let alt = l.alt_phone_norm;
+  if ('alt_phone' in b) { alt = b.alt_phone ? L.normPhone(b.alt_phone) : null; if (b.alt_phone && !alt) throw bad('Second mobile number is not valid'); }
+  if (alt === pn) alt = null;
+  if ((pn !== l.phone_norm || alt !== l.alt_phone_norm || email !== l.email) && !b.force) {
+    const dups = L.findDuplicates(ctx.oid, pn, email, l.id, alt);
     if (dups.length) throw new HttpError(409, 'Another lead already has this phone/email', { duplicates: dups });
   }
   const custom = 'custom' in b ? L.cleanCustom(ctx.oid, { ...JSON.parse(l.custom || '{}'), ...b.custom }, true) : JSON.parse(l.custom || '{}');
@@ -119,9 +123,9 @@ r.patch('/api/leads/:id', (ctx) => {
   const pid = pick('pref_project_id') ? Number(pick('pref_project_id')) : null;
   let rating = l.rating, manual = l.rating_manual;
   if ('rating' in b) { if (b.rating === 'auto') manual = 0; else if (['Hot', 'Warm', 'Cold'].includes(b.rating)) { rating = b.rating; manual = 1; } }
-  run(`UPDATE leads SET name=?,phone=?,phone_norm=?,email=?,source=?,partner_id=?,budget_min=?,budget_max=?,pref_size_min=?,pref_size_max=?,pref_facing=?,pref_location=?,pref_project_id=?,
+  run(`UPDATE leads SET name=?,phone=?,phone_norm=?,alt_phone=?,alt_phone_norm=?,email=?,source=?,partner_id=?,budget_min=?,budget_max=?,pref_size_min=?,pref_size_max=?,pref_facing=?,pref_location=?,pref_project_id=?,
     purpose=?,notes=?,custom=?,rating=?,rating_manual=?,updated_at=? WHERE id=?`,
-    name, pn, pn, email, str(pick('source')), pick('partner_id') ? Number(pick('partner_id')) : null, num(pick('budget_min')), num(pick('budget_max')), num(pick('pref_size_min')), num(pick('pref_size_max')),
+    name, pn, pn, alt, alt, email, str(pick('source')), pick('partner_id') ? Number(pick('partner_id')) : null, num(pick('budget_min')), num(pick('budget_max')), num(pick('pref_size_min')), num(pick('pref_size_max')),
     str(pick('pref_facing')), str(pick('pref_location')), pid, str(pick('purpose')), str(pick('notes')), JSON.stringify(custom), rating, manual, now(), l.id);
   L.logActivity(ctx.oid, l.id, ctx.user.id, 'system', { content: 'Lead details updated' });
   L.rescore(ctx.oid, l.id);
@@ -233,6 +237,8 @@ r.del('/api/filters/:id', (ctx) => { run('DELETE FROM saved_filters WHERE id=? A
 const ALIASES = {
   name: ['name', 'full_name', 'fullname', 'customer', 'customer_name', 'lead_name', 'client', 'client_name', 'contact_name', 'contact_person'],
   phone: ['phone', 'mobile', 'mobile_no', 'mobile_number', 'phone_number', 'phone_no', 'contact', 'contact_no', 'contact_number', 'whatsapp', 'whatsapp_no', 'cell', 'number', 'mob', 'mob_no'],
+  phone2: ['phone2', 'phone_2', 'mobile2', 'mobile_2', 'mobile_no_2', 'mobile_number_2', 'phone_number_2', 'contact_2', 'contact_no_2', 'whatsapp_2', 'alt_phone', 'alt_mobile', 'alt_number', 'alt_contact', 'alternate_phone',
+    'alternate_mobile', 'alternate_number', 'alternate_contact', 'alternate_contact_number', 'secondary_phone', 'secondary_mobile', 'secondary_number', 'second_phone', 'second_mobile', 'second_number', 'other_phone', 'other_number', 'number_2', 'phone_no_2'],
   email: ['email', 'email_id', 'e_mail', 'mail', 'email_address'],
   source: ['source', 'lead_source', 'channel'],
   budget_min: ['budget_min', 'min_budget'],
@@ -245,7 +251,7 @@ const ALIASES = {
   notes: ['notes', 'note', 'remarks', 'remark', 'comment', 'comments', 'requirement', 'message'],
   rep: ['rep', 'assigned_to', 'assigned', 'owner', 'sales_rep', 'executive'],
 };
-const FIELD_LABELS = { name: 'Name', phone: 'Phone', email: 'Email', source: 'Source', budget_min: 'Budget (min)', budget_max: 'Budget (max)', pref_size: 'Plot size (sq.yd)',
+const FIELD_LABELS = { name: 'Name', phone: 'Phone', phone2: 'Second phone', email: 'Email', source: 'Source', budget_min: 'Budget (min)', budget_max: 'Budget (max)', pref_size: 'Plot size (sq.yd)',
   pref_facing: 'Facing', pref_location: 'Location', project: 'Project', purpose: 'Purpose', notes: 'Notes', rep: 'Assigned rep' };
 const FACINGS = ['East', 'West', 'North', 'South', 'North-East', 'North-West', 'South-East', 'South-West'];
 const slug = (h) => String(h).trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
@@ -253,12 +259,14 @@ const squash = (v) => String(v).toLowerCase().replace(/[^a-z0-9]/g, '');
 
 // --- value normalisers ---
 /** First valid Indian mobile in a cell — cells often hold "98765 43210 / 98450 12345", "Ph: +91-98765-43210" or "9876543210.0". */
-function pickPhone(v) {
+function pickPhones(v) {
   const whole = L.normPhone(v);
-  if (whole) return whole;
-  for (const m of String(v).replace(/(\d)\.0+(?!\d)/g, '$1').match(/(?:\+?91[\s-]?|0)?[6-9](?:[\s-]?\d){9}(?!\d)/g) || []) { const p = L.normPhone(m); if (p) return p; }
-  return null;
+  if (whole) return [whole];
+  const out = [];
+  for (const m of String(v ?? '').replace(/(\d)\.0+(?!\d)/g, '$1').match(/(?:\+?91[\s-]?|0)?[6-9](?:[\s-]?\d){9}(?!\d)/g) || []) { const p = L.normPhone(m); if (p && !out.includes(p)) out.push(p); }
+  return out;
 }
+const pickPhone = (v) => pickPhones(v)[0] || null;
 /** Spreadsheet exports are full of placeholders for "nothing here" — treat them all as blank. */
 const NULLISH = /^(null|nil|none|n\/?a|na|nan|undefined|not available|not provided|unknown|tbd|\?+|-+|—+|–+|\.+|\/+|0)$/i;
 const blank = (v) => { const t = String(v ?? '').replace(/\s+/g, ' ').trim(); return NULLISH.test(t) ? '' : t; };
@@ -285,7 +293,8 @@ function remember(entry) {
 // Looser header matching for headers that are not in ALIASES ("Mob. No.", "Client Details", "Enquiry From"…).
 // Tried in this order; a column is only claimed once.
 const FUZZY = [
-  ['phone', /(phone|mobile|\bmob\b|whats?app|contact ?(no|num)|\bcell\b|\btel\b|telephone|\bcontact\b|number|\bno\b\.?$)/, /(plot|s\.? ?no|sr\.? ?no|serial|row|\bid\b|alt|alternate|secondary|landline|office)/],
+  ['phone2', /((alt|alternate|alternative|secondary|second|other|2nd|another)\W*(phone|mobile|contact|number|no\b|whats?app|cell))|((phone|mobile|contact|number|\bno\b|whats?app|cell)\W*(2|ii|two|alt|secondary)\b)/],
+  ['phone', /(phone|mobile|\bmob\b|whats?app|contact ?(no|num)|\bcell\b|\btel\b|telephone|\bcontact\b|number|\bno\b\.?$)/, /(plot|s\.? ?no|sr\.? ?no|serial|row|\bid\b|alt|alternate|secondary|second|2nd|landline|office|\b2\b)/],
   ['email', /(e-?mail|mail ?id)/],
   ['source', /(source|channel|medium|campaign|enquiry (from|via)|inquiry (from|via)|referr|how did)/],
   ['project', /(project|layout|venture|scheme)/],
@@ -321,7 +330,7 @@ function autoMap(heads, cfs, table = []) {
   return map;
 }
 /** Turn the raw table into normalised lead rows, each marked valid / duplicate / invalid. Missing optional values are fine. */
-function analyse(oid, table, mapping, defSource, offset = 0, extras = true) {
+function analyse(oid, table, mapping, defSource, offset = 0, extras = true, repUser = null) {
   const cfs = all('SELECT * FROM custom_fields WHERE org_id=?', oid);
   const projects = all('SELECT id,name FROM projects WHERE org_id=?', oid), users = all("SELECT id,name,email FROM users WHERE org_id=? AND status='active'", oid);
   const heads = table[0], mapped = new Set(Object.values(mapping));
@@ -330,22 +339,24 @@ function analyse(oid, table, mapping, defSource, offset = 0, extras = true) {
     if (!row.some((c) => blank(c))) return; // empty or placeholder-only row
     const g = (k) => (mapping[k] !== undefined ? blank(row[mapping[k]]) : '');
     const warnings = [];
-    const d = { name: g('name'), phone: g('phone'), email: g('email').toLowerCase(), notes: g('notes'), pref_location: g('pref_location'), purpose: g('purpose') };
+    const d = { name: g('name'), phone: g('phone'), alt_phone: g('phone2'), email: g('email').toLowerCase(), notes: g('notes'), pref_location: g('pref_location'), purpose: g('purpose') };
     d.source = canon(L.SOURCES, g('source')) || g('source') || defSource;
     d.pref_facing = canon(FACINGS, g('pref_facing')) || '';
     const [bMin, bMax] = moneyRange(g('budget_max')); d.budget_max = bMax; d.budget_min = moneyRange(g('budget_min'))[1] ?? bMin;
     const [sMin, sMax] = sizeRange(g('pref_size')); if (sMin) { d.pref_size_min = sMin; d.pref_size_max = sMax; }
     const pj = g('project') && projects.find((p) => squash(p.name) === squash(g('project'))); if (pj) d.pref_project_id = pj.id;
-    const rp = g('rep').toLowerCase(); if (rp) { const u = users.find((x) => x.email.toLowerCase() === rp || x.name.toLowerCase() === rp); if (u) d.assigned_to = u.id; }
+    const rp = repUser ? '' : g('rep').toLowerCase(); if (rp) { const u = users.find((x) => x.email.toLowerCase() === rp || x.name.toLowerCase() === rp); if (u) d.assigned_to = u.id; }
     const custom = {}; cfs.forEach((f) => { const v = g('cf_' + f.id); if (v) custom[f.id] = f.type === 'checkbox' ? /^(y|yes|true|1)$/i.test(v) : v; });
     if (Object.keys(custom).length) d.custom = custom;
     // phone: the mapped cell first, then any other cell in the row that holds a mobile number
-    let pn = pickPhone(d.phone);
+    const mine = pickPhones(d.phone); // one cell may hold two numbers ("98765 43210 / 98450 12345")
+    let pn = mine[0] || null, alt = pickPhones(d.alt_phone)[0] || mine[1] || null;
     if (!pn) {
-      const typed = new Set(['budget_min', 'budget_max', 'pref_size', 'project', 'rep'].map((k) => mapping[k]).concat(Object.entries(mapping).filter(([k]) => k.startsWith('cf_')).map(([, v]) => v)));
-      const alt = row.findIndex((c, k) => k !== mapping.phone && !typed.has(k) && looksPhone(c));
-      if (alt >= 0) { pn = pickPhone(blank(row[alt])); warnings.push(`Phone taken from "${heads[alt] || 'column ' + (alt + 1)}"`); }
+      const typed = new Set(['budget_min', 'budget_max', 'pref_size', 'project', 'rep', 'phone2'].map((k) => mapping[k]).concat(Object.entries(mapping).filter(([k]) => k.startsWith('cf_')).map(([, v]) => v)));
+      const alt2 = row.findIndex((c, k) => k !== mapping.phone && !typed.has(k) && looksPhone(c));
+      if (alt2 >= 0) { const f = pickPhones(blank(row[alt2])); pn = f[0]; alt = alt || f[1] || null; warnings.push(`Phone taken from "${heads[alt2] || 'column ' + (alt2 + 1)}"`); }
     }
+    if (alt === pn) alt = null;
     if (!d.email) { const alt = row.findIndex((c, k) => !mapped.has(k) && looksEmail(c)); if (alt >= 0) d.email = blank(row[alt]).toLowerCase(); }
     if (extras) { // columns we could not map are kept as notes instead of being thrown away
       const more = row.map((c, k) => (mapped.has(k) || !blank(c) ? '' : `${heads[k] && !/^Column \d+$/.test(heads[k]) ? heads[k] : 'Info'}: ${blank(c)}`)).filter(Boolean);
@@ -359,30 +370,37 @@ function analyse(oid, table, mapping, defSource, offset = 0, extras = true) {
     let status = 'valid', reasons = invalid, dup_of = null;
     if (invalid.length) status = 'invalid';
     else {
-      const inFile = seenPhone.get(pn) || (d.email && seenEmail.get(d.email));
-      if (inFile) { status = 'duplicate'; reasons = [`Same ${seenPhone.has(pn) ? 'phone' : 'email'} as row ${inFile} in this file`]; }
+      const inFile = seenPhone.get(pn) || (alt && seenPhone.get(alt)) || (d.email && seenEmail.get(d.email));
+      if (inFile) { status = 'duplicate'; reasons = [`Same ${seenPhone.has(pn) || (alt && seenPhone.has(alt)) ? 'phone' : 'email'} as row ${inFile} in this file`]; }
       else {
-        const ex = L.findDuplicates(oid, pn, d.email);
-        if (ex.length) { status = 'duplicate'; dup_of = ex[0].id; reasons = [`Already in CRM as "${ex[0].name}" (${ex[0].stage}${ex[0].rep_name ? ', ' + ex[0].rep_name : ''})`]; }
+        const ex = L.findDuplicates(oid, pn, d.email, 0, alt);
+        if (ex.length) {
+          status = 'duplicate'; dup_of = ex[0].id;
+          const visible = !repUser || ex[0].assigned_to === repUser.id; // reps are told a duplicate exists, but only see details of their own leads
+          reasons = [visible ? `Already in CRM as "${ex[0].name}" (${ex[0].stage}${ex[0].rep_name ? ', ' + ex[0].rep_name : ''})` : 'Already in CRM (belongs to another rep)'];
+        }
       }
-      if (!seenPhone.has(pn)) seenPhone.set(pn, i + 2 + offset);
+      for (const ph of [pn, alt]) if (ph && !seenPhone.has(ph)) seenPhone.set(ph, i + 2 + offset);
       if (d.email && !seenEmail.has(d.email)) seenEmail.set(d.email, i + 2 + offset);
-      d.phone = pn;
+      d.phone = pn; d.alt_phone = alt || '';
     }
     out.push({ row: i + 2 + offset, data: d, status, errors: reasons, warnings: status === 'valid' ? warnings : [], dup_of });
   });
   return out;
 }
-r.post('/api/leads/import/preview', { admin: true }, async (ctx) => {
+/** Reps may import too, but only for themselves — and only when the admin allows reps to add leads. */
+function importGuard(ctx) { if (!ctx.isAdmin && !L.getSettings(ctx.oid).reps_can_create_leads) throw forbidden('Your admin has not enabled lead creation for reps'); }
+r.post('/api/leads/import/preview', async (ctx) => {
+  importGuard(ctx);
   const b = ctx.body;
   let up = b.upload_id ? uploads.get(b.upload_id) : null;
-  if (b.upload_id && (!up || up.oid !== ctx.oid)) throw bad('This upload has expired. Please choose the file again.');
+  if (b.upload_id && (!up || up.oid !== ctx.oid || up.uid !== ctx.user.id)) throw bad('This upload has expired. Please choose the file again.');
   let id = b.upload_id;
   if (!up) {
     // file_base64 is the normal path; `rows` (already-parsed table) is kept for API clients
     const parsed = b.file_base64 ? await readTable(Buffer.from(b.file_base64, 'base64'), b.filename) : { kind: 'rows', rows: b.rows || [], note: '' };
     if (parsed.rows.length < 2) throw bad('The file has no data rows');
-    up = { oid: ctx.oid, table: parsed.rows, offset: parsed.offset || 0, kind: parsed.kind, note: parsed.note, filename: str(b.filename) || 'upload' };
+    up = { oid: ctx.oid, uid: ctx.user.id, table: parsed.rows, offset: parsed.offset || 0, kind: parsed.kind, note: parsed.note, filename: str(b.filename) || 'upload' };
     id = remember(up);
   }
   const cfs = all('SELECT * FROM custom_fields WHERE org_id=? ORDER BY position,id', ctx.oid);
@@ -399,7 +417,7 @@ r.post('/api/leads/import/preview', { admin: true }, async (ctx) => {
     throw bad('Choose which column holds the phone number');
   }
   const extras = b.include_extras !== false;
-  const rows = analyse(ctx.oid, up.table, mapping, str(b.default_source) || 'Other', up.offset, extras);
+  const rows = analyse(ctx.oid, up.table, mapping, str(b.default_source) || 'Other', up.offset, extras, ctx.isAdmin ? null : ctx.user);
   const n = (st) => rows.filter((x) => x.status === st).length;
   return {
     upload_id: id, filename: up.filename, kind: up.kind, note: up.note, needs_mapping: false, include_extras: extras, mapping, headers: heads, rows,
@@ -408,25 +426,27 @@ r.post('/api/leads/import/preview', { admin: true }, async (ctx) => {
     total: rows.length, valid: n('valid'), duplicates: n('duplicate'), invalid: n('invalid'), to_import: n('valid'),
   };
 });
-r.post('/api/leads/import/commit', { admin: true }, (ctx) => {
+r.post('/api/leads/import/commit', (ctx) => {
+  importGuard(ctx);
   // Only rows the preview marked valid are sent; each is still re-checked here, so a duplicate can never slip in.
   const items = (Array.isArray(ctx.body.rows) ? ctx.body.rows : []).filter((it) => !it.status || it.status === 'valid');
   if (!items.length) throw bad('Nothing to import');
-  let imported = 0; const skipped = []; const perRep = {};
+  let imported = 0; const skipped = []; const perRep = {}; const batch = newToken(6);
   tx(() => items.forEach((it) => {
     try {
-      const { lead, created } = L.createLead(ctx.oid, ctx.user, it.data, { lenient: true, silent: true });
+      const data = { ...it.data }; if (!ctx.isAdmin) data.assigned_to = ctx.user.id; // a rep's import always lands on that rep
+      const { lead, created } = L.createLead(ctx.oid, ctx.user, data, { lenient: true, silent: true, via: 'import', batch });
       if (created) { imported++; if (lead.assigned_to) perRep[lead.assigned_to] = (perRep[lead.assigned_to] || 0) + 1; }
     } catch (e) {
       if (!(e instanceof HttpError)) throw e;
       skipped.push({ row: it.row, name: it.data?.name, reason: e.status === 409 ? `Already in CRM as "${e.extra.duplicates[0].name}"` : e.message });
     }
   }));
-  for (const [uid, n] of Object.entries(perRep)) L.notify(ctx.oid, { user: Number(uid), title: `${n} new leads assigned`, message: `${n} imported lead(s) were assigned to you`, link: '#/leads' });
-  L.notifyAdmins(ctx.oid, 'Lead import completed', `${imported} lead(s) imported, ${skipped.length} skipped`, '#/leads');
+  for (const [uid, n] of Object.entries(perRep).filter(([uid]) => Number(uid) !== ctx.user.id)) L.notify(ctx.oid, { user: Number(uid), title: `${n} new leads assigned`, message: `${n} imported lead(s) were assigned to you`, link: '#/leads' });
+  if (imported) L.notifyAdmins(ctx.oid, 'Lead import completed', `${ctx.user.name} imported ${imported} lead(s), ${skipped.length} skipped`, '#/leads');
   L.audit(ctx.oid, ctx.user.id, 'lead.import', 'lead', null, `${imported} imported, ${skipped.length} skipped`);
   if (ctx.body.upload_id) uploads.delete(ctx.body.upload_id);
-  return { imported, skipped };
+  return { imported, skipped, batch };
 });
 
 // ----- public intake: enquiry form + webhook -----
@@ -449,7 +469,7 @@ r.post('/api/webhook/:code/:secret/lead', { public: true }, (ctx) => {
   if (!org || L.getSettings(org.id).webhook_secret !== ctx.params.secret) throw new HttpError(401, 'Invalid webhook credentials');
   const b = ctx.body;
   const pj = b.project ? get('SELECT id FROM projects WHERE org_id=? AND lower(name)=lower(?)', org.id, String(b.project)) : null;
-  const d = { name: b.name || b.full_name, phone: b.phone || b.mobile, email: b.email, source: b.source || 'Website', notes: b.notes || b.message, pref_project_id: pj?.id || b.project_id,
+  const d = { name: b.name || b.full_name, phone: b.phone || b.mobile, alt_phone: b.alt_phone || b.phone2 || b.alternate_phone, email: b.email, source: b.source || 'Website', notes: b.notes || b.message, pref_project_id: pj?.id || b.project_id,
     budget_max: b.budget, pref_location: b.location };
   if (b.partner_code) { const pa = get('SELECT id FROM partners WHERE org_id=? AND id=?', org.id, Number(b.partner_code)); if (pa) d.partner_id = pa.id; }
   const { lead, created } = L.createLead(org.id, null, d, { intake: true, lenient: true });

@@ -23,6 +23,7 @@ const NAV = [
   { sec: 'Activity' },
   { to: '/visits', icon: 'truck', t: 'Site visits' },
   { to: '/comms', icon: 'phone', t: 'Calls & WhatsApp' },
+  { to: '/activity', icon: 'list', t: 'My activity', rep: true },
   { to: '/attendance', icon: 'clock', t: 'Attendance', repT: 'Clock-in' },
   { sec: 'Finance', admin: true },
   { to: '/collections', icon: 'rupee', t: 'Collections', admin: true },
@@ -45,7 +46,7 @@ const ROUTES = [
   ['/inventory', inventory.projects, { skel: 'cards' }], ['/inventory/:id', inventory.project, { skel: 'detail' }],
   ['/bookings', bookings.list, { skel: 'list' }], ['/bookings/:id', bookings.detail, { skel: 'detail' }], ['/collections', bookings.collections, { admin: true, skel: 'list' }], ['/discounts', bookings.discounts, { admin: true, skel: 'list' }],
   ['/tasks', work.tasks, { skel: 'list' }], ['/visits', work.visits, { skel: 'list' }], ['/comms', work.comms, { skel: 'list' }], ['/router', work.router, { admin: true, skel: 'list' }],
-  ['/team', team.team, { admin: true, skel: 'cards' }], ['/attendance', team.attendance, { skel: 'list' }], ['/partners', team.partners, { admin: true, skel: 'list' }],
+  ['/team', team.team, { admin: true, skel: 'cards' }], ['/activity', team.myActivity, { skel: 'list' }], ['/attendance', team.attendance, { skel: 'list' }], ['/partners', team.partners, { admin: true, skel: 'list' }],
   ['/reports', adminv.reports, { admin: true, skel: 'dashboard' }], ['/ai', adminv.ai, { admin: true }], ['/settings', adminv.settings, { admin: true, skel: 'list' }],
 ];
 const compiled = ROUTES.map(([p, fn, o = {}]) => { const keys = []; const re = new RegExp('^' + p.replace(/:(\w+)/g, (_, k) => { keys.push(k); return '([^/]+)'; }) + '$'); return { re, keys, fn, o, p }; });
@@ -99,7 +100,7 @@ function navHtml(path, query) {
   const admin = isAdmin(), open = openGroups();
   let sec = null, html = '';
   for (const n of NAV) {
-    if (n.admin && !admin) continue;
+    if ((n.admin && !admin) || (n.rep && admin)) continue;
     if (n.sec) { html += `<div class="sep">${n.sec}</div>`; continue; }
     const kids = (n.children || []).filter((c) => !c.admin || admin);
     const childOn = kids.some((c) => isActive(c.to, path, query, c.exact));
@@ -212,7 +213,7 @@ function openPalette() {
     list.innerHTML = groups.filter((g) => g.rows.length).map((g) => `<div class="cmd-h">${esc(g.h)}</div>` + g.rows.map((r) => { items.push(r); return `<div class="cmd-i ${k === act ? 'act' : ''}" role="option" data-k="${k++}"><span class="ci">${ico(r.icon)}</span><span class="t"><b>${esc(r.title)}</b><span>${esc(r.sub || '')}</span></span>${r.chip || ''}</div>`; }).join('')).join('') || `<div class="empty" style="padding:var(--s6)"><div class="empty-ic">${ico('search', 'lg')}</div><b>No results</b><p>Try a name, a phone number or a plot number.</p></div>`;
     $('.act', list)?.scrollIntoView({ block: 'nearest' });
   };
-  const pages = () => NAV.filter((n) => n.to && (!n.admin || isAdmin())).map((n) => ({ icon: n.icon, title: navLabel(n), sub: 'Go to page', href: n.to }));
+  const pages = () => NAV.filter((n) => n.to && (!n.admin || isAdmin()) && !(n.rep && isAdmin())).map((n) => ({ icon: n.icon, title: navLabel(n), sub: 'Go to page', href: n.to }));
   const home = () => {
     const recent = (() => { try { return JSON.parse(store.get('rp_recent_leads') || '[]'); } catch { return []; } })();
     paint([{ h: 'Quick actions', rows: quickAddItems().map((a) => ({ icon: a.icon, title: a.label, sub: 'Create', run: a.action })) },

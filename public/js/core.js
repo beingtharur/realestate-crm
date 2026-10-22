@@ -85,6 +85,16 @@ export function dayLabel(iso) {
   const diff = Math.round((Date.parse(day(new Date())) - Date.parse(day(new Date(iso)))) / 864e5);
   return diff === 0 ? 'Today' : diff === 1 ? 'Yesterday' : fmtDate(iso);
 }
+/** WhatsApp-style day heading: Today · Yesterday · Thursday (within the last week) · 12 Oct 2026 */
+export function dayHeading(iso) {
+  const ist = (d) => new Date(d.getTime() + 330 * 60000).toISOString().slice(0, 10);
+  const diff = Math.round((Date.parse(ist(new Date())) - Date.parse(ist(new Date(iso)))) / 864e5);
+  if (diff === 0) return 'Today';
+  if (diff === 1) return 'Yesterday';
+  if (diff > 1 && diff < 7) return new Date(iso).toLocaleDateString('en-IN', { weekday: 'long', timeZone: 'Asia/Kolkata' });
+  return fmtDate(iso);
+}
+export const istDay = (iso) => new Date(new Date(iso).getTime() + 330 * 60000).toISOString().slice(0, 10);
 export const phoneFmt = (p) => (p && p.length === 10 ? `+91 ${p.slice(0, 5)} ${p.slice(5)}` : p || '');
 export const dtLocal = (iso) => { const d = iso ? new Date(iso) : new Date(); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16); };
 export const fromDT = (v) => (v ? new Date(v).toISOString() : '');

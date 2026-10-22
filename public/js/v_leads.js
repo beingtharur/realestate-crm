@@ -1,5 +1,5 @@
 // Leads: list (list / cards / board), filters, bulk actions, lead drawer, lead page, add/edit form, import.
-import { repLoads, loadOptions, S, $, $$, esc, get, post, patch, del, api, on, modal, modalForm, confirmDialog, askText, toast, fld, inp, sel, repOptions, projectOptions, getForm, inr, inrShort, rel, fmtDT, fmtDate, fmtTime, friendlyDT, dayLabel,
+import { repLoads, loadOptions, S, $, $$, esc, get, post, patch, del, api, on, modal, modalForm, confirmDialog, askText, toast, fld, inp, sel, repOptions, projectOptions, getForm, inr, inrShort, rel, fmtDT, fmtDate, fmtTime, friendlyDT, dayLabel, dayHeading, istDay,
   isAdmin, empty, errorState, badge, stageBadge, ratingBadge, statusChip, phoneFmt, waLink, nav, reload, userName, dtLocal, fromDT, copy, fullLink, authUrl, debounce, skeleton, STAGE_CLS, callLabel, callCls, mmss,
   quickActions, ico, avatar, drawer, openMenu, store, rememberLead, today, enhanceSelects } from './core.js';
 import { bookingWizard } from './v_bookings.js';
@@ -15,6 +15,7 @@ export function leadForm(lead, onDone, preset = {}) {
   const body = `<div id="dupwarn"></div>
     ${sec(1, 'Contact')}<div class="frm-g">
     ${fld('Name <span class="req">*</span>', inp('name', l.name || '', 'required placeholder="Full name" autocomplete="off"'))}${fld('Mobile <span class="req">*</span>', inp('phone', l.phone_norm || l.phone || '', 'required data-v="phone" inputmode="tel" placeholder="98765 43210" autocomplete="off"'), '10-digit Indian mobile; +91 is optional')}
+    ${fld('Second mobile', inp('alt_phone', l.alt_phone_norm || l.alt_phone || '', 'data-v="phone" inputmode="tel" placeholder="Optional — another number for this client"'), 'Calls from this number are matched to the lead too')}
     ${fld('Email', inp('email', l.email || '', 'type="email" data-v="email" placeholder="name@example.com"'))}${fld('Buying purpose', sel('purpose', [['', 'Not sure'], 'Investment', 'Self-use / build home', 'Both'], l.purpose || ''))}</div>
     ${sec(2, 'What they are looking for', 'optional')}<div class="frm-g">
     ${fld('Budget from (₹)', inp('budget_min', l.budget_min ?? '', 'type="number" min="0" placeholder="e.g. 2500000"'))}${fld('Budget up to (₹)', inp('budget_max', l.budget_max ?? '', 'type="number" min="0" placeholder="e.g. 4000000"'))}
@@ -74,9 +75,9 @@ const SORTS = {
 const COLS = [
   { k: 'lead', label: 'Lead', sort: 'name', always: true },
   { k: 'stage', label: 'Status' }, { k: 'rating', label: 'Priority', sort: 'score' }, { k: 'next', label: 'Next follow-up', sort: 'followup' }, { k: 'last', label: 'Last contacted', sort: 'contacted' },
-  { k: 'rep', label: 'Assigned to', admin: true }, { k: 'actions', label: 'Contact', always: true }, { k: 'budget', label: 'Budget', sort: 'budget', cls: 'r' }, { k: 'source', label: 'Source' }, { k: 'project', label: 'Project' }, { k: 'score', label: 'Score', cls: 'r' }, { k: 'created', label: 'Created', sort: 'newest' },
+  { k: 'rep', label: 'Assigned to', admin: true }, { k: 'actions', label: 'Contact', always: true }, { k: 'budget', label: 'Budget', sort: 'budget', cls: 'r' }, { k: 'source', label: 'Source' }, { k: 'project', label: 'Project' }, { k: 'score', label: 'Score', cls: 'r' }, { k: 'created', label: 'Added', sort: 'newest' },
 ];
-const DEFAULT_COLS = ['lead', 'stage', 'rating', 'next', 'last', 'rep', 'actions', 'budget', 'source'];
+const DEFAULT_COLS = ['lead', 'stage', 'rating', 'next', 'last', 'created', 'rep', 'actions', 'budget', 'source'];
 const FILTER_LABELS = { stage: 'Status', rating: 'Priority', source: 'Source', project_id: 'Project', assigned: 'Assigned to', followup: 'Follow-up', from: 'Created from', to: 'Created to', uncontacted: 'Not contacted', cooling: 'Going cold' };
 const EMPTY_F = { q: '', assigned: '', rating: '', source: '', stage: '', project_id: '', followup: '', from: '', to: '', uncontacted: '', cooling: '' };
 let F = { ...EMPTY_F };
@@ -85,14 +86,17 @@ const nextCell = (l) => {
   const late = Date.parse(l.next_due) < Date.now();
   return `<span class="${late ? 'bad' : ''}" style="white-space:nowrap">${late ? ico('alert', 'sm') + ' ' : ''}${friendlyDT(l.next_due)}</span>`;
 };
+/** "10:42 AM · by Ravi" — who added the lead and when (day shown separately as a heading in date-sorted views) */
+const addedBy = (l) => (l.added_by_name ? esc(l.added_by_name) : l.added_via === 'intake' ? 'Website / webhook' : 'System');
+const addedCell = (l) => `<div style="white-space:nowrap"><b style="font-weight:600">${fmtTime(l.created_at)}</b> <span class="small dim">${esc(dayHeading(l.created_at))}</span></div><div class="small dim">${l.added_via === 'import' ? 'Imported' : 'Added'} by ${addedBy(l)}</div>`;
 const leadMeta = (l) => `${stageBadge(l.stage)}${ratingBadge(l.rating)}`;
 
 export async function list(root, _p, q) {
   const admin = isAdmin();
   const isNarrow = innerWidth < 760;
   let view = pref.get('rp_leadview2', isNarrow ? 'cards' : 'list'); if (isNarrow && view === 'list') view = 'cards';
-  let sort = pref.get('rp_leadsort', 'updated');
-  let cols = pref.get('rp_leadcols2', DEFAULT_COLS).filter((k) => COLS.find((c) => c.k === k && (!c.admin || admin)));
+  let sort = pref.get('rp_leadsort2', 'newest');
+  let cols = pref.get('rp_leadcols3', DEFAULT_COLS).filter((k) => COLS.find((c) => c.k === k && (!c.admin || admin)));
   if (!admin) cols = cols.filter((k) => k !== 'rep');
   let tab = q.tab || 'all', saved = [], rows = [], shown = 50, selected = new Set(), expanded = new Set(), loading = false, failed = false;
   // arriving from the dashboard / sidebar: apply exactly the requested filter
@@ -112,20 +116,29 @@ export async function list(root, _p, q) {
 
   // ---- row renderers ----
   const cell = {
-    lead: (l) => `<div class="namecell"><div style="min-width:0"><a href="#/leads/${l.id}" class="lname" data-open="${l.id}" style="color:var(--text);font-weight:600">${esc(l.name)}</a>${l.flag_status === 'pending' ? ` <span class="badge b-red" title="Suspicious lead">${ico('alert')}Review</span>` : ''}<div class="muted small">${phoneFmt(l.phone_norm)}</div></div></div>`,
+    lead: (l) => `<div class="namecell"><div style="min-width:0"><a href="#/leads/${l.id}" class="lname" data-open="${l.id}" style="color:var(--text);font-weight:600">${esc(l.name)}</a>${l.flag_status === 'pending' ? ` <span class="badge b-red" title="Suspicious lead">${ico('alert')}Review</span>` : ''}<div class="muted small">${phoneFmt(l.phone_norm)}${l.alt_phone_norm ? ` · ${phoneFmt(l.alt_phone_norm)}` : ''}</div></div></div>`,
     stage: (l) => stageBadge(l.stage), rating: (l) => ratingBadge(l.rating), next: nextCell,
     last: (l) => (l.last_contacted ? `<span title="${esc(fmtDT(l.last_contacted))}">${rel(l.last_contacted)}</span>` : '<span class="dim">Never</span>'),
     rep: (l) => esc(l.rep_name || 'Unassigned'), source: (l) => esc(l.source || '—'), project: (l) => esc(l.project_name || '—'), budget: (l) => (l.budget_max ? inrShort(l.budget_max) : '—'), score: (l) => l.score,
-    created: (l) => `<span class="small dim">${rel(l.created_at)}</span>`, actions: (l) => quickActions(l.id, l.name, l.phone_norm),
+    created: addedCell, actions: (l) => quickActions(l.id, l.name, l.phone_norm),
   };
-  const tableHtml = (data) => `<div class="tbl-wrap"><table class="tbl fit"><thead><tr><th style="width:36px"><input type="checkbox" id="selall" aria-label="Select all shown leads" ${data.length && data.every((l) => selected.has(l.id)) ? 'checked' : ''}></th>${cols.map((k) => { const c = COLS.find((x) => x.k === k); const sorted_ = c.sort && c.sort === sort; return `<th class="${c.cls || ''} ${c.sort ? 'sortable' : ''} ${sorted_ ? 'sorted' : ''}" ${c.sort ? `data-sort="${c.sort}"` : ''} scope="col">${c.label}${c.sort ? `<span class="sort">${ico(sorted_ ? 'arrowDown' : 'chevDown', 'sm')}</span>` : ''}</th>`; }).join('')}</tr></thead>
-    <tbody>${data.map((l) => `<tr class="click ${selected.has(l.id) ? 'sel' : ''}" data-id="${l.id}"><td><input type="checkbox" data-sel="${l.id}" ${selected.has(l.id) ? 'checked' : ''} aria-label="Select ${esc(l.name)}"></td>${cols.map((k) => `<td class="${COLS.find((c) => c.k === k).cls || ''}">${cell[k](l)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
-  const cardsHtml = (data) => `<div class="lcards">${data.map((l) => `<div class="lcard ${expanded.has(l.id) ? 'open' : ''} ${selected.has(l.id) ? 'sel' : ''}" data-id="${l.id}"><div class="lc-top" data-toggle="${l.id}" role="button" tabindex="0" aria-expanded="${expanded.has(l.id)}">
+  const byDate = () => sort === 'newest' || sort === 'oldest';
+  const dayCounts = (data) => { const m = new Map(); data.forEach((l) => { const k = istDay(l.created_at); m.set(k, (m.get(k) || 0) + 1); }); return m; };
+  /** Inserts a "Thursday · 12 leads" divider whenever the day changes, like WhatsApp. Only in the date-sorted views. */
+  const withDays = (page, all_, row, wrap) => {
+    if (!byDate()) return page.map(row).join('');
+    const counts = dayCounts(all_); let last = '';
+    return page.map((l) => { const k = istDay(l.created_at); const head = k === last ? '' : wrap(dayHeading(l.created_at), counts.get(k)); last = k; return head + row(l); }).join('');
+  };
+  const tableHtml = (data, all_ = data) => `<div class="tbl-wrap"><table class="tbl fit"><thead><tr><th style="width:36px"><input type="checkbox" id="selall" aria-label="Select all shown leads" ${data.length && data.every((l) => selected.has(l.id)) ? 'checked' : ''}></th>${cols.map((k) => { const c = COLS.find((x) => x.k === k); const sorted_ = c.sort && c.sort === sort; return `<th class="${c.cls || ''} ${c.sort ? 'sortable' : ''} ${sorted_ ? 'sorted' : ''}" ${c.sort ? `data-sort="${c.sort}"` : ''} scope="col">${c.label}${c.sort ? `<span class="sort">${ico(sorted_ ? 'arrowDown' : 'chevDown', 'sm')}</span>` : ''}</th>`; }).join('')}</tr></thead>
+    <tbody>${withDays(data, all_, (l) => `<tr class="click ${selected.has(l.id) ? 'sel' : ''}" data-id="${l.id}"><td><input type="checkbox" data-sel="${l.id}" ${selected.has(l.id) ? 'checked' : ''} aria-label="Select ${esc(l.name)}"></td>${cols.map((k) => `<td class="${COLS.find((c) => c.k === k).cls || ''}">${cell[k](l)}</td>`).join('')}</tr>`,
+      (h, n) => `<tr class="dayrow"><td colspan="${cols.length + 1}"><span class="daychip">${esc(h)}</span><span class="small dim"> ${n} lead${n === 1 ? '' : 's'} added</span></td></tr>`)}</tbody></table></div>`;
+  const cardsHtml = (data, all_ = data) => `<div class="lcards">${withDays(data, all_, (l) => `<div class="lcard ${expanded.has(l.id) ? 'open' : ''} ${selected.has(l.id) ? 'sel' : ''}" data-id="${l.id}"><div class="lc-top" data-toggle="${l.id}" role="button" tabindex="0" aria-expanded="${expanded.has(l.id)}">
       <input type="checkbox" data-sel="${l.id}" ${selected.has(l.id) ? 'checked' : ''} aria-label="Select ${esc(l.name)}"><div class="lc-main"><div class="lc-name">${esc(l.name)}${l.flag_status === 'pending' ? ico('alert', 'sm') : ''}</div>
       <div class="lc-meta">${stageBadge(l.stage)}${ratingBadge(l.rating)}<span class="${l.next_due && Date.parse(l.next_due) < Date.now() ? 'bad' : ''}">${ico('clock', 'sm')} ${l.next_due ? friendlyDT(l.next_due) : 'No follow-up'}</span></div></div>
       ${quickActions(l.id, l.name, l.phone_norm)}<span class="lc-chev">${ico('chevDown')}</span></div>
-      <div class="lc-more"><dl class="kv"><dt>Phone</dt><dd>${phoneFmt(l.phone_norm)}</dd><dt>Last contacted</dt><dd>${l.last_contacted ? rel(l.last_contacted) : 'Never'}</dd>${admin ? `<dt>Assigned to</dt><dd>${esc(l.rep_name || 'Unassigned')}</dd>` : ''}<dt>Source</dt><dd>${esc(l.source || '—')}</dd><dt>Budget</dt><dd>${l.budget_max ? inrShort(l.budget_max) : '—'}</dd><dt>Project</dt><dd>${esc(l.project_name || '—')}</dd></dl>
-      <div class="row"><button class="btn primary sm" data-open="${l.id}">${ico('eye', 'sm')}View details</button><a class="btn sm" href="#/leads/${l.id}">${ico('external', 'sm')}Full page</a></div></div></div>`).join('')}</div>`;
+      <div class="lc-more"><dl class="kv"><dt>Phone</dt><dd>${phoneFmt(l.phone_norm)}${l.alt_phone_norm ? '<br>' + phoneFmt(l.alt_phone_norm) : ''}</dd><dt>Added</dt><dd>${esc(dayHeading(l.created_at))}, ${fmtTime(l.created_at)} · ${addedBy(l)}</dd><dt>Last contacted</dt><dd>${l.last_contacted ? rel(l.last_contacted) : 'Never'}</dd>${admin ? `<dt>Assigned to</dt><dd>${esc(l.rep_name || 'Unassigned')}</dd>` : ''}<dt>Source</dt><dd>${esc(l.source || '—')}</dd><dt>Budget</dt><dd>${l.budget_max ? inrShort(l.budget_max) : '—'}</dd><dt>Project</dt><dd>${esc(l.project_name || '—')}</dd></dl>
+      <div class="row"><button class="btn primary sm" data-open="${l.id}">${ico('eye', 'sm')}View details</button><a class="btn sm" href="#/leads/${l.id}">${ico('external', 'sm')}Full page</a></div></div></div>`, (h, n) => `<div class="dayhead"><span class="daychip">${esc(h)}</span><span class="small dim"> ${n} added</span></div>`)}</div>`;
   const boardHtml = (data) => `<div class="kanban">${STAGES().map((s) => { const c = data.filter((l) => l.stage === s); return `<div class="kcol" data-stage="${s}"><h4><span>${stageBadge(s)}</span><span class="muted small">${c.length}</span></h4><div class="cards">${c.slice(0, 40).map((l) => `<div class="kcard" draggable="true" data-id="${l.id}"><div class="n">${esc(l.name)}</div><div class="m">${phoneFmt(l.phone_norm)}</div><div class="m">${ratingBadge(l.rating)}${l.budget_max ? `<span>${inrShort(l.budget_max)}</span>` : ''}${l.project_name ? `<span>${esc(l.project_name)}</span>` : ''}</div>
       <div class="m ${l.next_due && Date.parse(l.next_due) < Date.now() ? 'bad' : ''}">${ico('clock', 'sm')} ${l.next_due ? friendlyDT(l.next_due) : 'No follow-up'}${admin && l.rep_name ? ' · ' + esc(l.rep_name) : ''}</div><div style="margin-top:8px">${quickActions(l.id, l.name, l.phone_norm)}</div></div>`).join('')}${c.length > 40 ? `<div class="muted small center">+${c.length - 40} more — use filters or list view</div>` : ''}</div></div>`; }).join('')}</div>`;
 
@@ -136,7 +149,7 @@ export async function list(root, _p, q) {
 
   // ---- page frame (drawn once) ----
   root.innerHTML = `<div class="ph1"><div><h1>Leads</h1><p id="lcount">&nbsp;</p></div><div class="row">
-      ${admin ? `<button class="btn ghost icon" id="exp" aria-label="Export all leads" data-tip="Export all (CSV)">${ico('download')}</button><button class="btn" id="imp">${ico('upload', 'sm')}Import</button>` : ''}<button class="btn primary" id="add">${ico('plus', 'sm')}Add lead</button></div></div>
+      ${admin ? `<button class="btn ghost icon" id="exp" aria-label="Export all leads" data-tip="Export all (CSV)">${ico('download')}</button>` : ''}${admin || S.settings?.reps_can_create_leads ? `<button class="btn" id="imp">${ico('upload', 'sm')}Import</button>` : ''}<button class="btn primary" id="add">${ico('plus', 'sm')}Add lead</button></div></div>
     ${admin ? `<div class="tabs" id="tabs">${[['all', 'All leads'], ['unassigned', 'Unassigned'], ['flagged', 'Suspicious'], ['duplicates', 'Duplicate reports']].map(([k, l]) => `<button data-tab="${k}" class="${k === tab ? 'on' : ''}">${l}</button>`).join('')}</div>` : ''}
     <div class="toolbar"><div class="tsearch">${ico('search')}<input type="search" id="fq" placeholder="Search name, phone, email or notes" value="${esc(F.q)}" aria-label="Search leads" data-native></div>
       <div style="position:relative"><button class="btn" id="fbtn" aria-haspopup="dialog">${ico('filter', 'sm')}Filters<span class="badge b-brand hidden" id="fcount" style="margin-left:2px"></span></button><div class="fpanel hidden" id="fpanel" role="dialog" aria-label="Filters"></div></div>
@@ -163,11 +176,11 @@ export async function list(root, _p, q) {
     if (!total) {
       const filtered = nFilters() || F.q;
       body.innerHTML = filtered ? empty('No leads match these filters', 'Try removing a filter or searching for something else.', '<button class="btn" data-clearf>Clear all filters</button>', 'search')
-        : empty('No leads yet', 'Once you add your first lead, it will appear here.', `<div class="row" style="justify-content:center"><button class="btn primary" data-addlead>${ico('plus', 'sm')}Add lead</button>${admin ? `<button class="btn" data-importleads>${ico('upload', 'sm')}Import from Excel or CSV</button>` : ''}</div>`, 'users');
+        : empty('No leads yet', 'Once you add your first lead, it will appear here.', `<div class="row" style="justify-content:center"><button class="btn primary" data-addlead>${ico('plus', 'sm')}Add lead</button>${admin || S.settings?.reps_can_create_leads ? `<button class="btn" data-importleads>${ico('upload', 'sm')}Import from Excel or CSV</button>` : ''}</div>`, 'users');
       $('#bulk', root).innerHTML = ''; return;
     }
     const page = view === 'board' ? data : data.slice(0, shown);
-    body.innerHTML = (view === 'board' ? boardHtml(page) : view === 'cards' ? cardsHtml(page) : tableHtml(page))
+    body.innerHTML = (view === 'board' ? boardHtml(page) : view === 'cards' ? cardsHtml(page, data) : tableHtml(page, data))
       + (view !== 'board' && total > shown ? `<div class="pager"><span>Showing ${shown} of ${total}</span><button class="btn" data-more>Show ${Math.min(50, total - shown)} more</button></div>` : view !== 'board' && total > 50 ? `<div class="pager">All ${total} leads shown</div>` : '');
     paintBulk();
     if (view === 'board') wireBoard(page);
@@ -220,9 +233,9 @@ export async function list(root, _p, q) {
   on(root, 'click', '[data-sfd]', async (el) => { await del('/filters/' + el.dataset.sfd); saved = await get('/filters'); filterPanel(); toast('Saved view deleted'); });
   on(root, 'click', '[data-fsave]', () => modalForm({ title: 'Save this view', submit: 'Save view', body: fld('Name', inp('name', '', 'required placeholder="e.g. Hot leads — Green Valley"')),
     onSubmit: async (d) => { await post('/filters', { name: d.name, filters: F }); saved = await get('/filters'); filterPanel(); toast('View saved', 'ok'); } }));
-  $('#sbtn', root).onclick = (e) => openMenu(e.currentTarget, Object.entries(SORTS).map(([k, [l]]) => ({ label: l, icon: k === sort ? 'check' : '', action: () => { sort = k; pref.set('rp_leadsort', k); paint(); } })));
+  $('#sbtn', root).onclick = (e) => openMenu(e.currentTarget, Object.entries(SORTS).map(([k, [l]]) => ({ label: l, icon: k === sort ? 'check' : '', action: () => { sort = k; pref.set('rp_leadsort2', k); paint(); } })));
   $('#selmode', root).onclick = (e) => { const on_ = document.body.classList.toggle('selecting'); e.currentTarget.setAttribute('aria-pressed', on_); e.currentTarget.classList.toggle('primary', on_); if (!on_) { selected.clear(); paint(); } };
-  $('#cbtn', root).onclick = (e) => openMenu(e.currentTarget, [{ header: 'Show columns' }, ...COLS.filter((c) => !c.always && (!c.admin || admin)).map((c) => ({ label: c.label, icon: cols.includes(c.k) ? 'check' : '', action: () => { cols = cols.includes(c.k) ? cols.filter((x) => x !== c.k) : COLS.map((x) => x.k).filter((k) => k === c.k || cols.includes(k)); pref.set('rp_leadcols2', cols); paint(); } }))]);
+  $('#cbtn', root).onclick = (e) => openMenu(e.currentTarget, [{ header: 'Show columns' }, ...COLS.filter((c) => !c.always && (!c.admin || admin)).map((c) => ({ label: c.label, icon: cols.includes(c.k) ? 'check' : '', action: () => { cols = cols.includes(c.k) ? cols.filter((x) => x !== c.k) : COLS.map((x) => x.k).filter((k) => k === c.k || cols.includes(k)); pref.set('rp_leadcols3', cols); paint(); } }))]);
   on(root, 'click', '#vw [data-v]', (el) => { view = el.dataset.v; pref.set('rp_leadview2', view); paint(); });
   on(root, 'click', '#tabs [data-tab]', (el) => { tab = el.dataset.tab; selected.clear(); load(); });
   $('#add', root).onclick = () => leadForm(null, (r) => { load(); });
@@ -232,7 +245,7 @@ export async function list(root, _p, q) {
   on(root, 'click', '[data-importleads]', () => importModal(load));
   on(root, 'click', '[data-retry]', load);
   on(root, 'click', '[data-more]', () => { shown += 50; paint(); });
-  on(root, 'click', '[data-sort]', (el) => { const s = el.dataset.sort; sort = sort === s && s === 'newest' ? 'oldest' : s; pref.set('rp_leadsort', sort); paint(); });
+  on(root, 'click', '[data-sort]', (el) => { const s = el.dataset.sort; sort = sort === s && s === 'newest' ? 'oldest' : s; pref.set('rp_leadsort2', sort); paint(); });
   // open details in a drawer so the list (and its scroll position) stays where it is
   on(root, 'click', '[data-open]', (el, e) => { if (e.metaKey || e.ctrlKey) return; e.preventDefault(); openLead(el.dataset.open); });
   on(root, 'click', 'tr.click', (tr, e) => { if (e.target.closest('input, .qa, a, button')) return; openLead(tr.dataset.id); });
@@ -260,7 +273,7 @@ export async function list(root, _p, q) {
       onSubmit: async (d) => { if (d.stage === 'Lost' && !d.lost_reason) throw new Error('Choose why these leads were lost'); const r = await post('/leads/bulk-stage', { ids, stage: d.stage, lost_reason: d.lost_reason }); toast(`${r.updated} lead${r.updated === 1 ? '' : 's'} moved to ${d.stage}${r.skipped.length ? ` · ${r.skipped.length} skipped` : ''}`, 'ok'); selected.clear(); load(); } });
     if (act === 'task') return modalForm({ title: `Schedule a follow-up for ${ids.length} lead${ids.length > 1 ? 's' : ''}`, submit: 'Create follow-ups', body: `${fld('What needs to happen?', inp('title', 'Follow up', 'required'))}<div class="frm-g">${fld('Due', inp('due_at', dtLocal(new Date(Date.now() + 86400e3)), 'type="datetime-local" required'))}${fld('Priority', sel('priority', ['High', 'Medium', 'Low'], 'Medium'))}</div>`,
       onSubmit: async (d) => { let ok = 0; for (const id of ids.slice(0, 100)) { try { await post('/tasks', { lead_id: id, title: d.title, due_at: fromDT(d.due_at), priority: d.priority }); ok++; } catch { /* skip */ } } toast(`${ok} follow-up${ok === 1 ? '' : 's'} scheduled`, 'ok'); selected.clear(); load(); } });
-    if (act === 'export') { const data = picked(); const csv = [['Name', 'Phone', 'Email', 'Status', 'Priority', 'Source', 'Project', 'Budget', 'Assigned to', 'Next follow-up', 'Created'], ...data.map((l) => [l.name, l.phone_norm, l.email, l.stage, l.rating, l.source, l.project_name, l.budget_max, l.rep_name, l.next_due, l.created_at])].map((r) => r.map((v) => { v = v == null ? '' : String(v); return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v; }).join(',')).join('\n');
+    if (act === 'export') { const data = picked(); const csv = [['Name', 'Phone', 'Second phone', 'Email', 'Status', 'Priority', 'Source', 'Project', 'Budget', 'Assigned to', 'Next follow-up', 'Added on', 'Added by'], ...data.map((l) => [l.name, l.phone_norm, l.alt_phone_norm, l.email, l.stage, l.rating, l.source, l.project_name, l.budget_max, l.rep_name, l.next_due, l.created_at, l.added_by_name || l.added_via])].map((r) => r.map((v) => { v = v == null ? '' : String(v); return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v; }).join(',')).join('\n');
       const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['﻿' + csv], { type: 'text/csv' })); a.download = `leads_${today()}.csv`; a.click(); toast(`${data.length} leads exported`, 'ok'); return; }
     if (act === 'delete') deleteLeads(ids, () => { selected.clear(); load(); });
   });
@@ -304,9 +317,9 @@ function importModal(done) {
   let pv = null, tabSel = 'all', extras = true;
   const KIND = { csv: 'CSV', xlsx: 'Excel (.xlsx)', xls: 'Excel (.xls)', pdf: 'PDF' };
   const m = modal({ title: 'Import leads', xl: true, body: `<div id="imp1">
-      <p class="muted">Upload an <b>Excel</b> (.xlsx / .xls), <b>CSV / TSV / text</b> or text-based <b>PDF</b> list — any column order, with or without a header row. Only a <b>phone number</b> is needed; empty or "N/A" cells are fine. You'll check the column mapping and a preview before anything is added.</p>
+      <p class="muted">Upload an <b>Excel</b> (.xlsx / .xls), <b>CSV / TSV / text</b> or text-based <b>PDF</b> list — any column order, with or without a header row. Only a <b>phone number</b> is needed; empty or "N/A" cells are fine. If a client has <b>two numbers</b>, put them in two columns (e.g. <i>Phone</i> and <i>Alternate number</i>) or in one cell separated by <b>/</b> — both are saved. ${isAdmin() ? '' : '<br>These leads will be added to <b>your</b> list.'} You'll check the column mapping and a preview before anything is added.</p>
       <div class="frm-g">${fld('Default lead source', sel('def', S.meta.sources, 'Other'), 'Used for rows that have no source')}${fld('File', '<input type="file" id="ifile" accept=".csv,.xlsx,.xls,.pdf,text/csv,application/pdf">')}</div>
-      <a href="data:text/csv;charset=utf-8,${encodeURIComponent('name,phone,email,source,budget,size,facing,location,project,purpose,notes\nRamesh Kumar,9876543210,ramesh@example.com,Facebook Ads,35 L,200,East,Shadnagar,,Investment,Called from ad\n')}" download="leads_template.csv">⬇ Download template</a><div id="ierr" class="mt"></div></div>
+      <a href="data:text/csv;charset=utf-8,${encodeURIComponent('name,phone,alternate_phone,email,source,budget,size,facing,location,project,purpose,notes\nRamesh Kumar,9876543210,9845012345,ramesh@example.com,Facebook Ads,35 L,200,East,Shadnagar,,Investment,Called from ad\n')}" download="leads_template.csv">⬇ Download template</a><div id="ierr" class="mt"></div></div>
       <div id="imp2" class="hidden"></div>` });
   const readFile = (f) => new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result.split(',')[1]); fr.onerror = rej; fr.readAsDataURL(f); });
   const src = () => $('[name=def]', m.el).value;
@@ -334,7 +347,7 @@ function importModal(done) {
         <button class="btn sm primary mt" id="iapply">Apply mapping</button></div></details>
       ${pv.needs_mapping ? '' : `<div class="grid g6 keep mb">${stat('Total records', pv.total)}${stat('Valid', pv.valid, 'green')}${stat('Duplicates', pv.duplicates, 'amber')}${stat('Invalid', pv.invalid, 'red')}${stat('Will be imported', pv.to_import, 'brand')}</div>
       <div class="tabs">${[['all', 'All', pv.total], ['valid', 'Valid', pv.valid], ['duplicate', 'Duplicates', pv.duplicates], ['invalid', 'Invalid', pv.invalid]].map(([k, l, n]) => `<button data-t="${k}" class="${tabSel === k ? 'on' : ''}">${l} <span class="muted small">(${n})</span></button>`).join('')}</div>
-      <div class="tbl-wrap" style="max-height:320px"><table class="tbl"><thead><tr><th>Row</th><th>Name</th><th>Phone</th><th>Email</th><th>Source</th><th>Budget</th><th>Result</th></tr></thead><tbody>${shown.slice(0, 300).map((r) => `<tr><td>${r.row}</td><td>${esc(r.data.name)}</td><td>${r.status === 'invalid' ? esc(r.data.phone) : phoneFmt(r.data.phone)}</td><td class="small">${esc(r.data.email || '')}</td>
+      <div class="tbl-wrap" style="max-height:320px"><table class="tbl"><thead><tr><th>Row</th><th>Name</th><th>Phone(s)</th><th>Email</th><th>Source</th><th>Budget</th><th>Result</th></tr></thead><tbody>${shown.slice(0, 300).map((r) => `<tr><td>${r.row}</td><td>${esc(r.data.name)}</td><td>${r.status === 'invalid' ? esc(r.data.phone) : phoneFmt(r.data.phone)}${r.data.alt_phone ? `<div class="small muted">${phoneFmt(r.data.alt_phone)}</div>` : ''}</td><td class="small">${esc(r.data.email || '')}</td>
         <td>${r.status === 'valid' ? sel('src', [...new Set([r.data.source, ...S.meta.sources])], r.data.source, `data-row="${r.row}" style="padding:3px 6px"`) : esc(r.data.source)}</td><td class="small">${r.data.budget_max ? inrShort(r.data.budget_max) : ''}</td>
         <td>${r.status === 'valid' ? badge('Will import', 'b-green') + (r.warnings || []).map((w) => `<div class="small" style="color:var(--amber)">${esc(w)}</div>`).join('') : `${badge(r.status === 'duplicate' ? 'Duplicate — skipped' : 'Invalid — skipped', r.status === 'duplicate' ? 'b-amber' : 'b-red')}<div class="small muted">${esc(r.errors.join('; '))}</div>`}</td></tr>`).join('') || `<tr><td colspan="7" class="empty">No rows in this view</td></tr>`}</tbody></table></div>
       ${shown.length > 300 ? `<p class="muted small">Showing the first 300 of ${shown.length} rows. All valid rows will be imported.</p>` : ''}
@@ -355,7 +368,7 @@ function importModal(done) {
       try {
         const r = await post('/leads/import/commit', { upload_id: pv.upload_id, rows: pv.rows.filter((x) => x.status === 'valid') });
         const left = [...pv.rows.filter((x) => x.status !== 'valid').map((x) => ({ row: x.row, name: x.data.name, reason: x.errors.join('; ') })), ...r.skipped];
-        p2.innerHTML = `<div class="ok-box"><b>${r.imported} lead(s) imported.</b> ${left.length} row(s) were left out (${pv.duplicates} duplicate, ${pv.invalid} invalid${r.skipped.length ? `, ${r.skipped.length} rejected at import` : ''}).</div>${left.length ? `<div class="tbl-wrap" style="max-height:300px"><table class="tbl"><thead><tr><th>Row</th><th>Name</th><th>Why it was left out</th></tr></thead><tbody>${left.map((x) => `<tr><td>${x.row}</td><td>${esc(x.name || '')}</td><td>${esc(x.reason)}</td></tr>`).join('')}</tbody></table></div>` : ''}<div class="row mt" style="justify-content:flex-end"><button class="btn primary" data-close>Done</button></div>`;
+        p2.innerHTML = `<div class="ok-box"><b>${r.imported} lead(s) imported</b> on ${esc(dayHeading(new Date().toISOString()))} at ${fmtTime(new Date().toISOString())}. ${left.length} row(s) were left out (${pv.duplicates} duplicate, ${pv.invalid} invalid${r.skipped.length ? `, ${r.skipped.length} rejected at import` : ''}).</div>${left.length ? `<div class="tbl-wrap" style="max-height:300px"><table class="tbl"><thead><tr><th>Row</th><th>Name</th><th>Why it was left out</th></tr></thead><tbody>${left.map((x) => `<tr><td>${x.row}</td><td>${esc(x.name || '')}</td><td>${esc(x.reason)}</td></tr>`).join('')}</tbody></table></div>` : ''}<div class="row mt" style="justify-content:flex-end"><button class="btn primary" data-close>Done</button></div>`;
         done && done();
       } catch (err) { toast(err.message, 'err'); ev.target.disabled = false; }
     };
@@ -451,7 +464,7 @@ export async function openLeadDrawer(id, onChange) {
   const load = async () => {
     let d; try { d = await get('/leads/' + id); } catch (e) { dr.body.innerHTML = errorState(e.status === 404 ? 'This lead is no longer available.' : 'Something went wrong while loading this lead.', e.status !== 404); on(dr.body, 'click', '[data-retry]', load); return; }
     cur = d; const l = d.lead; rememberLead(l);
-    $('#dh', dr.el).innerHTML = `<div class="row" style="flex-wrap:nowrap;gap:var(--s3)">${avatar(l.name, 'lg')}<div style="min-width:0"><h3 style="font-size:var(--fs-lg);overflow:hidden;text-overflow:ellipsis">${esc(l.name)}</h3><div class="muted small"><a href="tel:+91${l.phone_norm}" data-call="${l.id}" data-call-name="${esc(l.name)}">${phoneFmt(l.phone_norm)}</a>${l.email ? ' · ' + esc(l.email) : ''}</div></div></div>`;
+    $('#dh', dr.el).innerHTML = `<div class="row" style="flex-wrap:nowrap;gap:var(--s3)">${avatar(l.name, 'lg')}<div style="min-width:0"><h3 style="font-size:var(--fs-lg);overflow:hidden;text-overflow:ellipsis">${esc(l.name)}</h3><div class="muted small"><a href="tel:+91${l.phone_norm}" data-call="${l.id}" data-call-name="${esc(l.name)}">${phoneFmt(l.phone_norm)}</a>${l.alt_phone_norm ? ` · <a href="tel:+91${l.alt_phone_norm}">${phoneFmt(l.alt_phone_norm)}</a>` : ''}${l.email ? ' · ' + esc(l.email) : ''}</div></div></div>`;
     dr.body.innerHTML = `<div class="acts">${actionButtons(l)}<button class="btn icon" id="dmore" aria-label="More actions" data-tip="More">${ico('more')}</button></div>
       ${nbaHtml(d.next_action, l)}
       ${contextHtml(l, d)}
@@ -500,7 +513,7 @@ export async function detail(root, { id }) {
     ${l.dup_status === 'reported' ? `<div class="warn-box">${ico('copy', 'sm')}<span>Reported as duplicate by ${esc(userName(l.dup_reported_by))}${l.dup_note ? ': ' + esc(l.dup_note) : ''}. ${admin ? '<button class="btn sm" data-act="dupok">Not a duplicate</button>' : ''}</span></div>` : ''}
     ${d.duplicates.length ? `<div class="info-box">${ico('info', 'sm')}<span>Other leads share this phone/email: ${d.duplicates.map((x) => admin ? `<a href="#/leads/${x.id}">${esc(x.name)}</a>` : esc(x.name)).join(', ')}</span></div>` : ''}
     <div class="lhead">${avatar(l.name, 'lg')}<div class="grow" style="min-width:0"><h1>${esc(l.name)}</h1>
-      <div class="meta"><a href="tel:+91${l.phone_norm}" data-call="${l.id}" data-call-name="${esc(l.name)}">${ico('phone', 'sm')} ${phoneFmt(l.phone_norm)}</a>${l.email ? `<span>${ico('send', 'sm')} ${esc(l.email)}</span>` : ''}<span>${esc(l.source || 'Unknown source')}</span><span>Added ${rel(l.created_at)}</span></div></div></div>
+      <div class="meta"><a href="tel:+91${l.phone_norm}" data-call="${l.id}" data-call-name="${esc(l.name)}">${ico('phone', 'sm')} ${phoneFmt(l.phone_norm)}</a>${l.alt_phone_norm ? `<a href="tel:+91${l.alt_phone_norm}">${ico('phone', 'sm')} ${phoneFmt(l.alt_phone_norm)}</a>` : ''}${l.email ? `<span>${ico('send', 'sm')} ${esc(l.email)}</span>` : ''}<span>${esc(l.source || 'Unknown source')}</span><span title="${esc(fmtDT(l.created_at))}">Added ${esc(dayHeading(l.created_at))}, ${fmtTime(l.created_at)} by ${addedBy(l)}${l.added_via === 'import' ? ' (bulk import)' : ''}</span></div></div></div>
     <div class="acts mt d-only">${actionButtons(l)}${showBook ? `<button class="btn" data-act="book">${ico('file', 'sm')}Book plot</button>` : ''}<button class="btn icon" id="more" aria-label="More actions" data-tip="More actions">${ico('more')}</button></div>
     <div class="actionbar"><a class="ab" href="tel:+91${l.phone_norm}" data-call="${l.id}" data-call-name="${esc(l.name)}">${ico('phone')}Call</a><button class="ab" data-wa="${l.id}" data-wa-name="${esc(l.name)}" data-wa-phone="${l.phone_norm}">${ico('message')}WhatsApp</button><button class="ab" data-act="note">${ico('edit')}Note</button><button class="ab" data-act="task">${ico('checkCircle')}Follow-up</button><button class="ab" id="more3" aria-label="More">${ico('more')}More</button></div>
     ${nbaHtml(d.next_action, l)}
