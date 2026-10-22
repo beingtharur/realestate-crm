@@ -218,6 +218,7 @@ const RVtoken = () => 'not-a-real-token';
   section('Aaj ka haal');
   x = await call('GET', '/api/briefing', null, A); ok(x.status === 200 && x.body.numbers && Array.isArray(x.body.alerts) && x.body.alerts.length <= 3 && Array.isArray(x.body.reps), 'owner briefing: numbers, at most 3 alerts, rep list', x.body);
   ok(x.body.alerts.every((a) => a.title && a.href), 'every alert has a title and a link');
+  ok(x.body.money && typeof x.body.money.month_sales === 'number' && Array.isArray(x.body.projects) && x.body.projects.every((p) => p.total >= p.available && 'month_bookings' in p), 'briefing has money for the month and a card per project', x.body.projects);
   x = await call('GET', '/api/briefing', null, R); ok(x.status === 403, 'reps cannot open the owner briefing');
 
   section('Import');

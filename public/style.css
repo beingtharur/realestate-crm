@@ -509,3 +509,8 @@ body.nav-collapsed .side-foot .navbtn{justify-content:center;padding:0}
 .tstat[data-href]{cursor:pointer}.tstat .l{font-size:var(--fs-xs);color:var(--text-3)}.tstat .v{font-size:1.9rem;font-weight:700;line-height:1.2}.tstat .x{font-size:var(--fs-xs);color:var(--text-3)}
 .dl.up{color:var(--green)}.dl.down{color:var(--red)}
 @media(max-width:640px){.tgrid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.tstat.bad .v{color:var(--red)}
+.pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:var(--s3)}
+.pj{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:var(--s3) var(--s4);box-shadow:var(--sh-1);cursor:pointer}.pj:hover{border-color:var(--border-strong)}
+.pjm{display:flex;flex-wrap:wrap;gap:4px 14px;margin-top:8px;font-size:var(--fs-xs);color:var(--text-3)}.pjm b{color:var(--text)}
+.tgrid4{grid-template-columns:repeat(4,minmax(0,1fr))}@media(max-width:900px){.tgrid4{grid-template-columns:repeat(2,minmax(0,1fr))}}

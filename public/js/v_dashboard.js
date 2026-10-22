@@ -99,17 +99,31 @@ export async function render(root, _p, q) {
 // ================= Aaj ka haal: the owner's one-screen morning view =================
 export async function today(root) {
   const draw = async () => {
-    const d = await get('/briefing'), n = d.numbers;
+    const d = await get('/briefing'), n = d.numbers, m = d.money;
     const hr = new Date().getHours(), first = (d.name || '').split(' ')[0];
     const delta = (a, b) => (a === b ? '' : `<span class="dl ${a > b ? 'up' : 'down'}">${a > b ? '▲' : '▼'} ${Math.abs(a - b)} vs yesterday</span>`);
-    const stat = (label, val, extra = '', href = '') => `<div class="tstat" ${href ? `data-href="${href}" role="button" tabindex="0"` : ''}><div class="l">${label}</div><div class="v">${val}</div>${extra ? `<div class="x">${extra}</div>` : ''}</div>`;
+    const stat = (label, val, extra = '', href = '', cls = '') => `<div class="tstat ${cls}" ${href ? `data-href="${href}" role="button" tabindex="0"` : ''}><div class="l">${label}</div><div class="v">${val}</div>${extra ? `<div class="x">${extra}</div>` : ''}</div>`;
     const sev = ['red', 'red', 'amber'];
     const alerts = d.alerts.length
       ? d.alerts.map((a, i) => `<button class="talert ${sev[i]}" data-href="${a.href}"><span class="num">${i + 1}</span><span class="tx"><b>${esc(a.title)}</b><span>${esc(a.detail)}</span></span><span class="go">${ico('chevRight', 'sm')}</span></button>`).join('')
       : `<div class="talert ok"><span class="num">${ico('check', 'sm')}</span><span class="tx"><b>Sab theek hai</b><span>Nothing needs your attention right now.</span></span></div>`;
+    const pctTarget = m.month_target ? Math.round((m.month_sales / m.month_target) * 100) : null;
+    const money = `<div class="tgrid tgrid4">${stat('Sales this month', inrShort(m.month_sales), `${m.month_bookings} booking${m.month_bookings === 1 ? '' : 's'}${pctTarget !== null ? ` · ${pctTarget}% of ${inrShort(m.month_target)} target` : ''}`, '#/bookings')}
+      ${stat('Collected this month', inrShort(m.month_collected), '', '#/collections')}${stat('Due in next 7 days', inrShort(m.due_next_7d), `${m.due_next_7d_count} booking${m.due_next_7d_count === 1 ? '' : 's'}`, '#/collections')}
+      ${stat('Overdue payments', inrShort(m.overdue), `${m.overdue_count} booking${m.overdue_count === 1 ? '' : 's'}`, '#/collections', m.overdue ? 'bad' : '')}</div>`;
+    const proj = d.projects.length ? `<div class="pgrid">${d.projects.map((p) => {
+      const t = p.total || 1, seg = (k, c) => `<i style="width:${(p[k] / t) * 100}%;background:var(--${c})"></i>`;
+      return `<div class="pj" data-href="#/inventory/${p.id}" role="button" tabindex="0">
+        <div class="row between"><div><b>${esc(p.name)}</b><div class="small dim">${esc(p.city || '')}</div></div>${p.holds_expiring ? badge(`${p.holds_expiring} hold ending`, 'b-red') : p.slow ? badge('Slow', 'b-amber') : ''}</div>
+        <div class="stack-bar" style="margin:10px 0 6px">${seg('sold', 'slate')}${seg('booked', 'blue')}${seg('hold', 'amber')}${seg('available', 'green')}</div>
+        <div class="small"><b>${p.available}</b> of ${p.total} plots unsold${p.hold ? ` · ${p.hold} on hold` : ''}</div>
+        <div class="pjm"><span><b>${p.month_bookings}</b> sold this month${p.month_sales ? ' · ' + inrShort(p.month_sales) : ''}</span><span><b>${p.leads_7d}</b> new enquiries (7d)</span><span><b>${p.open_leads}</b> open leads</span>${p.visits_today ? `<span><b>${p.visits_today}</b> visit${p.visits_today > 1 ? 's' : ''} today</span>` : ''}${p.overdue ? `<span class="bad">${inrShort(p.overdue)} overdue</span>` : ''}</div></div>`;
+    }).join('')}</div>` : empty('No projects yet', 'Add your projects and plots to see them here.', '<a class="btn primary sm" href="#/inventory">Add a project</a>', 'map');
     const reps = d.reps.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Rep</th><th class="r">Calls today</th><th class="r">Leads not touched 48h</th><th>Clock-in</th></tr></thead><tbody>${d.reps.map((x) => `<tr class="click" data-href="#/team?rep=${x.id}"><td><b>${esc(x.name)}</b></td><td class="r ${x.calls ? '' : 'bad'}">${x.calls}</td><td class="r ${x.untouched ? 'bad' : ''}">${x.untouched}</td><td>${x.clocked_in ? badge('In', 'b-green') : '<span class="dim">—</span>'}</td></tr>`).join('')}</tbody></table></div>` : empty('No reps yet', 'Invite your team from Team & targets.', '', 'users');
     root.innerHTML = `<div class="ph1"><div><h1>Aaj ka haal</h1><p>${hr < 12 ? 'Good morning' : hr < 17 ? 'Good afternoon' : 'Good evening'}, ${esc(first)} · ${new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'Asia/Kolkata' })}</p></div><button class="btn" id="trf">${ico('refresh', 'sm')}Refresh</button></div>
       <h3 class="tsec">Needs you now</h3><div class="talerts">${alerts}</div>
+      <h3 class="tsec">Paisa — this month</h3>${money}
+      <h3 class="tsec">Your projects</h3>${proj}
       <h3 class="tsec">Today so far</h3>
       <div class="tgrid">${stat('New leads', n.new_leads, delta(n.new_leads, n.new_leads_yesterday), '#/leads?stage=New')}${stat('Calls made', n.calls, delta(n.calls, n.calls_yesterday), '#/comms')}${stat('Calls connected', n.connected, n.calls ? `${Math.round((n.connected / n.calls) * 100)}% of calls` : '')}
         ${stat('Overdue follow-ups', n.overdue_followups, '', '#/tasks?bucket=overdue')}${stat('Site visits', n.visits_today, '', '#/visits?when=today')}${stat('Bookings', n.bookings_today, n.sales_today ? inrShort(n.sales_today) : '', '#/bookings')}</div>

@@ -353,6 +353,31 @@ r.get('/api/briefing', { admin: true }, (ctx) => {
     return { id: u.id, name: u.name, calls: c, open_leads: h.open_leads, untouched: h.untouched, clocked_in: !!att?.clock_in, status: h.status };
   }).sort((a, b) => b.calls - a.calls);
 
+  // money, this month: what was sold, what came in, what is due — an owner's first question
+  const mo = L.period('month'), in7 = new Date(Date.now() + 330 * 60000 + 7 * 864e5).toISOString().slice(0, 10);
+  const mSales = get("SELECT COUNT(*) c, COALESCE(SUM(total),0) v FROM bookings WHERE org_id=? AND status<>'cancelled' AND booked_on>=? AND booked_on<?", oid, mo.fromD, mo.toD);
+  const mColl = get("SELECT COALESCE(SUM(amount),0) s FROM payments WHERE org_id=? AND kind='receipt' AND voided=0 AND paid_on>=? AND paid_on<?", oid, mo.fromD, mo.toD).s;
+  const dueNext = get("SELECT COALESCE(SUM(i.amount-i.paid_amount),0) s, COUNT(DISTINCT i.booking_id) n FROM installments i JOIN bookings b ON b.id=i.booking_id WHERE i.org_id=? AND b.status<>'cancelled' AND i.paid_amount<i.amount-0.5 AND i.due_date>=? AND i.due_date<=?", oid, today, in7);
+  const overdueAll = get("SELECT COALESCE(SUM(i.amount-i.paid_amount),0) s, COUNT(DISTINCT i.booking_id) n FROM installments i JOIN bookings b ON b.id=i.booking_id WHERE i.org_id=? AND b.status<>'cancelled' AND i.paid_amount<i.amount-0.5 AND i.due_date<?", oid, today);
+  const target = get("SELECT COALESCE(SUM(monthly_target),0) t FROM users WHERE org_id=? AND role='rep' AND status='active'", oid).t;
+  const money_ = { month_sales: mSales.v, month_bookings: mSales.c, month_target: target, month_collected: mColl, due_next_7d: dueNext.s, due_next_7d_count: dueNext.n, overdue: overdueAll.s, overdue_count: overdueAll.n };
+
+  // project by project
+  const w7 = L.addMs(-7 * 864e5), d30 = new Date(Date.now() + 330 * 60000 - 30 * 864e5).toISOString().slice(0, 10);
+  const projects = all("SELECT id,name,city FROM projects WHERE org_id=? AND status='active' ORDER BY name", oid).map((pj) => {
+    const pl = Object.fromEntries(all('SELECT status, COUNT(*) c FROM plots WHERE project_id=? GROUP BY status', pj.id).map((x) => [x.status, x.c]));
+    const total = Object.values(pl).reduce((a, b) => a + b, 0);
+    const ms = get("SELECT COUNT(*) c, COALESCE(SUM(total),0) v FROM bookings WHERE project_id=? AND status<>'cancelled' AND booked_on>=? AND booked_on<?", pj.id, mo.fromD, mo.toD);
+    const last = get("SELECT MAX(booked_on) d FROM bookings WHERE project_id=? AND status<>'cancelled'", pj.id).d;
+    const od = get("SELECT COALESCE(SUM(i.amount-i.paid_amount),0) s FROM installments i JOIN bookings b ON b.id=i.booking_id WHERE b.project_id=? AND b.status<>'cancelled' AND i.paid_amount<i.amount-0.5 AND i.due_date<?", pj.id, today).s;
+    const holdsToday = get("SELECT COUNT(*) c FROM plots WHERE project_id=? AND status='hold' AND hold_until<?", pj.id, addMs(24 * 3600e3)).c;
+    return { id: pj.id, name: pj.name, city: pj.city, total, available: pl.available || 0, hold: pl.hold || 0, booked: (pl.booked || 0), sold: pl.sold || 0,
+      month_bookings: ms.c, month_sales: ms.v, leads_7d: get('SELECT COUNT(*) c FROM leads WHERE org_id=? AND pref_project_id=? AND created_at>=?', oid, pj.id, w7).c,
+      open_leads: get("SELECT COUNT(*) c FROM leads WHERE org_id=? AND pref_project_id=? AND stage NOT IN ('Booked','Lost')", oid, pj.id).c,
+      visits_today: get("SELECT COUNT(*) c FROM visits WHERE project_id=? AND status='scheduled' AND scheduled_at>=? AND scheduled_at<?", pj.id, td.from, td.to).c,
+      overdue: od, holds_expiring: holdsToday, slow: total > 0 && (pl.available || 0) > 0 && (!last || last < d30) };
+  });
+
   // candidate alerts, each with a severity; the three highest are shown
   const A = [];
   const add = (sev, key, title, detail, href) => A.push({ sev, key, title, detail, href });
@@ -373,6 +398,10 @@ r.get('/api/briefing', { admin: true }, (ctx) => {
   const tpl = count("SELECT COUNT(*) c FROM templates WHERE org_id=? AND share_status='pending'", oid);
   if (tpl) add(40, 'templates', `${tpl} message template${tpl > 1 ? 's' : ''} to approve`, 'Reps asked to share them with the team', '#/comms?tab=templates');
   if (numbers.visits_today) add(50, 'visits', `${numbers.visits_today} site visit${numbers.visits_today > 1 ? 's' : ''} today`, 'Make sure a rep is assigned to each', '#/visits?when=today');
+  const expiring = projects.filter((x) => x.holds_expiring);
+  if (expiring.length) { const n = expiring.reduce((a, x) => a + x.holds_expiring, 0); add(88, 'holds', `${n} plot hold${n > 1 ? 's' : ''} expiring in 24h`, expiring.slice(0, 3).map((x) => `${x.name} (${x.holds_expiring})`).join(', ') + ' — close the booking or the plot goes back on sale', '#/inventory'); }
+  const slow = projects.filter((x) => x.slow);
+  if (slow.length) add(55, 'slow', `${slow.length} project${slow.length > 1 ? 's' : ''} with no booking in 30 days`, slow.slice(0, 3).map((x) => `${x.name} (${x.available} plots unsold)`).join(', '), `#/inventory/${slow[0].id}`);
   const alerts = A.sort((a, b) => b.sev - a.sev).slice(0, 3).map(({ sev, ...x }) => x);
-  return { date: today, name: ctx.user.name, numbers, alerts, reps };
+  return { date: today, name: ctx.user.name, numbers, money: money_, projects, alerts, reps };
 });
