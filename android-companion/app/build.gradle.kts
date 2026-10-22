@@ -13,7 +13,11 @@ android {
         targetSdk = 35
         versionCode = 3
         versionName = "1.2"
+        // Optional: bake the company's CRM address into the APK so reps never have to type it.
+        // Put   crmUrl=https://your-crm.onrender.com   in android-companion/gradle.properties (or pass -PcrmUrl=...).
+        buildConfigField("String", "DEFAULT_URL", "\"${(project.findProperty("crmUrl") as String? ?: "").trim().trimEnd('/')}\"")
     }
+    buildFeatures { buildConfig = true }
     buildTypes {
         release { isMinifyEnabled = false }
     }

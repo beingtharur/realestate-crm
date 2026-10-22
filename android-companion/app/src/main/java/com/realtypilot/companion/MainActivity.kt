@@ -73,6 +73,7 @@ class MainActivity : Activity() {
     override fun onBackPressed() { if (web.visibility == View.VISIBLE && web.canGoBack()) web.goBack() else super.onBackPressed() }
 
     private fun showCrm() {
+        if (Prefs.baseUrl(this).isEmpty() && BuildConfig.DEFAULT_URL.startsWith("http")) Prefs.setBaseUrl(this, BuildConfig.DEFAULT_URL)
         val base = Prefs.baseUrl(this)
         if (base.isEmpty()) { web.visibility = View.GONE; setupGroup.visibility = View.VISIBLE; return }
         setupGroup.visibility = View.GONE; web.visibility = View.VISIBLE
