@@ -586,18 +586,23 @@ export async function detail(root, { id }) {
 // One tap for the result of the call, then the next follow-up in the same step.
 const CALL_RESULTS = [
   { k: 'interested', label: 'Interested', icon: 'check', outcome: 'Connected', follow: 24, note: 'Interested' },
-  { k: 'later', label: 'Call back later', icon: 'clock', outcome: 'Connected', follow: 4, note: 'Asked to call back later' },
+  { k: 'later', label: 'Update later', icon: 'clock', outcome: 'Update Later', follow: 4, note: 'Asked to call back later' },
+  { k: 'interview', label: 'Interview scheduled', icon: 'calendar', outcome: 'Interview Scheduled', follow: 0 },
+  { k: 'ringing', label: 'Ringing', icon: 'phone', outcome: 'Ringing', follow: 2 },
+  { k: 'notpicked', label: 'Not picked', icon: 'phone', outcome: 'Not Picked', follow: 3 },
+  { k: 'busy', label: 'Busy', icon: 'phone', outcome: 'Busy', follow: 1 },
   { k: 'noanswer', label: 'No answer', icon: 'phone', outcome: 'Not Answered', follow: 3 },
-  { k: 'notint', label: 'Not interested', icon: 'x', outcome: 'Connected', follow: 0, note: 'Not interested', lost: true },
+  { k: 'notint', label: 'Not interested', icon: 'x', outcome: 'Not Interested', follow: 0, note: 'Not interested', lost: true },
   { k: 'wrong', label: 'Wrong number', icon: 'alert', outcome: 'Wrong Number', follow: 0 },
 ];
+const TALKED = ['Connected', 'Not Interested', 'Update Later', 'Interview Scheduled']; // the client actually spoke to the rep
 export function callModal(l, done, activityId) {
   let res = null;
   const nextMorning = (days) => { const d = new Date(); d.setDate(d.getDate() + days); d.setHours(10, 0, 0, 0); return d; };
   modalForm({ title: `${activityId ? 'Call result' : 'Log call'} — ${l.name}`, submit: 'Save', body: `${activityId ? '<p class="muted">Your phone did not report this call. Fill in what happened.</p>' : ''}
     <div class="fsec first">How did it go?</div><div class="chips" id="cres">${CALL_RESULTS.map((r) => `<button type="button" class="chip-btn" data-r="${r.k}">${ico(r.icon, 'sm')}${r.label}</button>`).join('')}</div>
     <div id="lostw" class="hidden">${fld('Lost reason <span class="req">*</span>', sel('lost_reason', [['', 'Choose a reason…'], ...S.meta.lost_reasons]), 'The lead will be marked Lost')}</div>
-    <div class="frm-g" style="margin-top:var(--s3)">${fld('Direction', sel('direction', [['outgoing', 'Outgoing'], ['incoming', 'Incoming']]))}${fld('Status', sel('outcome', [['Connected', 'Completed'], ['Not Answered', 'No Answer'], 'Busy', 'Rejected', 'Failed', 'Switched Off', 'Wrong Number', 'Voicemail', 'Missed']))}
+    <div class="frm-g" style="margin-top:var(--s3)">${fld('Direction', sel('direction', [['outgoing', 'Outgoing'], ['incoming', 'Incoming']]))}${fld('Status', sel('outcome', [['Connected', 'Completed'], ['Not Answered', 'No Answer'], ['Ringing', 'Ringing'], ['Busy', 'Busy'], ['Not Picked', 'Not picked'], ['Not Interested', 'Not interested'], ['Update Later', 'Update later'], ['Interview Scheduled', 'Interview scheduled'], 'Rejected', 'Failed', 'Switched Off', 'Wrong Number', 'Voicemail', 'Missed']))}
     ${fld('Duration (min)', inp('duration_min', '', 'type="number" min="0" placeholder="0"'))}${fld('Seconds', inp('duration_sec', '', 'type="number" min="0" max="59" placeholder="0"'))}
     ${fld('Notes', '<textarea name="notes" placeholder="What was discussed?"></textarea>', '', 'full')}
     ${fld('Next follow-up', inp('follow_at', '', 'type="datetime-local"'), 'Leave empty if no follow-up is needed', 'full')}</div>
@@ -622,7 +627,7 @@ export function callModal(l, done, activityId) {
       // a quick result says the call connected even without a stopwatch reading: record it as at least a few seconds
       const dur = (Number(d.duration_min) || 0) * 60 + (Number(d.duration_sec) || 0);
       const body = { ...d, activity_id: activityId };
-      if (d.outcome === 'Connected' && !dur) { body.duration_min = 0; body.duration_sec = 30; }
+      if (TALKED.includes(d.outcome) && !dur) { body.duration_min = 0; body.duration_sec = 30; }
       await post(`/leads/${l.id}/calls`, body);
       if (d.follow_at) await post('/tasks', { lead_id: l.id, title: `Follow up: ${l.name}`, due_at: fromDT(d.follow_at), description: d.notes || undefined });
       if (quick?.lost) await post(`/leads/${l.id}/stage`, { stage: 'Lost', lost_reason: d.lost_reason });

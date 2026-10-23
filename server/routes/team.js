@@ -167,10 +167,10 @@ r.get('/api/team/:id/activity', (ctx) => {
     calls: {
       first_call: calls[0]?.created_at || null, last_call: calls.length ? calls[calls.length - 1].created_at : null, total: calls.length,
       incoming: calls.filter((c) => c.direction === 'incoming').length, outgoing: outgoing.length,
-      missed: calls.filter((c) => c.outcome === 'Missed').length, connected: calls.filter((c) => c.outcome === 'Connected').length,
+      missed: calls.filter((c) => c.outcome === 'Missed').length, connected: calls.filter((c) => L.TALKED.includes(c.outcome)).length,
       attempted: outgoing.length, total_duration: calls.reduce((s, c) => s + (c.duration || 0), 0),
       items: { all: lim(calls.map(callRow)), incoming: lim(calls.filter((c) => c.direction === 'incoming').map(callRow)), outgoing: lim(outgoing.map(callRow)),
-        missed: lim(calls.filter((c) => c.outcome === 'Missed').map(callRow)), connected: lim(calls.filter((c) => c.outcome === 'Connected').map(callRow)) },
+        missed: lim(calls.filter((c) => c.outcome === 'Missed').map(callRow)), connected: lim(calls.filter((c) => L.TALKED.includes(c.outcome)).map(callRow)) },
     },
     tasks: { late: late.length, pending: pending.length, done: done.length, created: created.length,
       items: { late: lim(late.map(taskRow)), pending: lim(pending.map(taskRow)), done: lim(done.map(taskRow)), created: lim(created.map(taskRow)) } },

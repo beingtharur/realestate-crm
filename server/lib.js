@@ -174,7 +174,7 @@ function rescore(oid, id) {
   if (l.pref_project_id) s += 5;
   if (l.purpose) s += 5;
   s += { New: 0, Contacted: 5, 'Site Visit Scheduled': 15, 'Site Visit Completed': 25, Negotiation: 35, Booked: 50, Lost: 0 }[l.stage] || 0;
-  const calls = get("SELECT COUNT(*) c FROM activities WHERE org_id=? AND lead_id=? AND type='call' AND outcome='Connected'", oid, id).c;
+  const calls = get(`SELECT COUNT(*) c FROM activities WHERE org_id=? AND lead_id=? AND type='call' AND outcome IN (${TALKED_SQL})`, oid, id).c;
   s += Math.min(15, calls * 3);
   if (l.last_activity_at && Date.now() - Date.parse(l.last_activity_at) < 48 * 3600e3) s += 10;
   if (l.stage === 'Lost') s = Math.min(s, 10);
@@ -501,7 +501,10 @@ function nextNo(oid, prefix, table, col) {
 // ---------- calls ----------
 // Stored outcomes. "Connected" is shown to users as "Completed"; "Initiated" is a call started from the CRM
 // that the phone has not reported back yet.
-const CALL_OUTCOMES = ['Connected', 'Not Answered', 'Busy', 'Switched Off', 'Wrong Number', 'Voicemail', 'Missed', 'Rejected', 'Failed'];
+const CALL_OUTCOMES = ['Connected', 'Not Answered', 'Ringing', 'Busy', 'Not Picked', 'Not Interested', 'Update Later', 'Interview Scheduled', 'Switched Off', 'Wrong Number', 'Voicemail', 'Missed', 'Rejected', 'Failed'];
+// Outcomes where the client actually spoke to the rep: they keep the duration, count as a connected call and move a New lead to Contacted.
+const TALKED = ['Connected', 'Not Interested', 'Update Later', 'Interview Scheduled'];
+const TALKED_SQL = TALKED.map((x) => `'${x}'`).join(',');
 const CALL_PENDING = 'Initiated';
 /** True when this user has signed in from the Android companion app in the last 30 days. */
 function companionSession(userId) {
@@ -513,7 +516,7 @@ function companionSession(userId) {
  * activity_id completes an existing "Initiated" entry instead of adding a second one.
  */
 function recordCall(oid, actor, lead, c) {
-  const duration = c.outcome === 'Connected' ? Math.max(0, Math.round(Number(c.duration) || 0)) : 0;
+  const duration = TALKED.includes(c.outcome) ? Math.max(0, Math.round(Number(c.duration) || 0)) : 0;
   const started = c.started_at || now();
   const meta = { source: c.source || 'manual', phone: c.phone || lead.phone_norm, ended_at: c.started_at ? addMs(duration * 1000, Date.parse(started)) : now() };
   let id = c.activity_id;
@@ -522,7 +525,7 @@ function recordCall(oid, actor, lead, c) {
       actor.id, c.direction, c.outcome, duration, str(c.notes), JSON.stringify(meta), started, c.ext_id || null, id, oid);
     touchLead(oid, lead.id, started);
   } else id = Number(logActivity(oid, lead.id, actor.id, 'call', { direction: c.direction, outcome: c.outcome, duration, content: str(c.notes), meta, at: started, ext_id: c.ext_id }));
-  if (lead.stage === 'New' && c.outcome === 'Connected') setStage(oid, lead.id, 'Contacted', actor);
+  if (lead.stage === 'New' && TALKED.includes(c.outcome)) setStage(oid, lead.id, 'Contacted', actor);
   rescore(oid, lead.id);
   return id;
 }
@@ -537,5 +540,5 @@ module.exports = {
   getOrg, getSettings, saveSettings, notify, notifyAdmins, audit, logActivity, rescore, activeMember, repHealth, openLeadCount,
   isRoutable, isOnShift, workHours, shiftStartToday, istClock, hm, getPrefs, inDnd, PUSH_KINDS, ADMIN_ONLY_NOTICES, visibleNotifications,
   cleanCustom, findDuplicates, checkFlags, logEnquiry, assignLead, autoAssign, distributeLeads, runAutomation, setStage,
-  createLead, priceFor, CALL_OUTCOMES, CALL_PENDING, companionSession, recordCall, touchLead, instStatus, allocatePayment, bookingSummary, nextNo, LEAD_TEXT,
+  createLead, priceFor, CALL_OUTCOMES, TALKED, TALKED_SQL, CALL_PENDING, companionSession, recordCall, touchLead, instStatus, allocatePayment, bookingSummary, nextNo, LEAD_TEXT,
 };

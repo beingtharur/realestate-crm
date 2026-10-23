@@ -210,6 +210,11 @@ export function iconize(root) {
 }
 /** Watches the page: icons for new content, searchable dropdowns for long selects. Call once at start-up. */
 export function initUi() {
+  // phone numbers: only digits, +, space and - ; never more than 12 digits (91 + 10)
+  document.addEventListener('input', (e) => {
+    const i = e.target; if (!(i instanceof HTMLInputElement) || i.dataset.v !== 'phone') return;
+    let v = i.value.replace(/[^\d+\s-]/g, ''), n = 0; v = [...v].filter((c) => (/\d/.test(c) ? ++n <= 12 : true)).join(''); if (v !== i.value) i.value = v;
+  });
   const queue = new Set(); let raf = 0;
   const flush = () => { raf = 0; for (const n of queue) { if (n.isConnected) { enhancePasswords(n); iconize(n); enhanceSelects(n); } } queue.clear(); };
   new MutationObserver((muts) => {
@@ -256,9 +261,9 @@ export const STAGE_CLS = Object.fromEntries(Object.entries(STATUS.stage).map(([k
 export const stageBadge = (s) => badge(s, STAGE_CLS[s] || 'b-slate dotted');
 export const PLOT_CLS = Object.fromEntries(Object.entries(STATUS.plot).map(([k, v]) => [k, `b-${v} dotted`]));
 export const ratingBadge = (r) => `<span class="rate rate-${esc(r)}">${ico(r === 'Hot' ? 'flame' : r === 'Warm' ? 'sun' : 'snow', 'sm')}${esc(r)}</span>`;
-export const CALL_LABEL = { Connected: 'Completed', 'Not Answered': 'No Answer', Initiated: 'Waiting for phone…' };
+export const CALL_LABEL = { Connected: 'Completed', 'Not Answered': 'No Answer', 'Not Picked': 'Not picked', 'Not Interested': 'Not interested', 'Update Later': 'Update later', 'Interview Scheduled': 'Interview scheduled', Initiated: 'Waiting for phone…' };
 export const callLabel = (o) => CALL_LABEL[o] || o || '';
-export const callCls = (o) => `${o === 'Connected' ? 'b-green' : o === 'Initiated' ? 'b-blue' : o === 'Failed' || o === 'Rejected' ? 'b-red' : 'b-amber'} dotted`;
+export const callCls = (o) => `${o === 'Connected' || o === 'Interview Scheduled' ? 'b-green' : o === 'Initiated' || o === 'Update Later' ? 'b-blue' : o === 'Failed' || o === 'Rejected' || o === 'Not Interested' ? 'b-red' : 'b-amber'} dotted`;
 export const mmss = (sec) => `${String(Math.floor((sec || 0) / 60)).padStart(2, '0')}:${String((sec || 0) % 60).padStart(2, '0')}`;
 
 // ---------- feedback: toasts, snackbar ----------
@@ -470,7 +475,9 @@ function buildCombo(s) {
     pop = document.createElement('div'); pop.className = 'combo-pop'; pop.innerHTML = `<input type="search" class="combo-q" placeholder="Search…" aria-label="Search options" autocomplete="off" data-native><ul class="combo-list" role="listbox"></ul>`;
     box.append(pop); box.classList.add('open'); btn.setAttribute('aria-expanded', 'true');
     if (innerWidth <= 900) { scrim = document.createElement('div'); scrim.className = 'menu-scrim'; scrim.onclick = close; document.body.append(scrim); }
-    act = Math.max(0, options().findIndex((o) => o.v === s.value)); paint(''); const q = $('.combo-q', pop); q.focus();
+    act = Math.max(0, options().findIndex((o) => o.v === s.value)); paint(''); const q = $('.combo-q', pop);
+    const touch = matchMedia('(pointer:coarse)').matches;
+    if (!touch || options().length > 12) q.focus(); else q.style.display = 'none'; // on a phone a short list needs no keyboard
     q.addEventListener('input', () => { act = 0; paint(q.value); });
     q.addEventListener('keydown', (e) => {
       if (e.key === 'ArrowDown') { e.preventDefault(); act = Math.min(list.length - 1, act + 1); paint(q.value); }
@@ -479,7 +486,9 @@ function buildCombo(s) {
       else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); btn.focus(); }
       else if (e.key === 'Tab') close();
     });
-    pop.addEventListener('mousedown', (e) => { const li = e.target.closest('li[data-v]'); if (li) { e.preventDefault(); choose(li.dataset.v); } });
+    // mousedown only stops the search box losing focus; the choice is made on click, which is what a finger tap on a phone produces
+    pop.addEventListener('mousedown', (e) => { if (e.target.closest('li[data-v]')) e.preventDefault(); });
+    pop.addEventListener('click', (e) => { const li = e.target.closest('li[data-v]'); if (li) { e.preventDefault(); choose(li.dataset.v); } });
     document.addEventListener('mousedown', outside, true);
   };
   btn.addEventListener('click', (e) => { if (e.target.closest('[data-clr]')) { e.stopPropagation(); choose(''); return; } pop ? close() : open(); });

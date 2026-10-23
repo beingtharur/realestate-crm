@@ -331,7 +331,7 @@ r.del('/api/ai/history', { admin: true }, (ctx) => { run('DELETE FROM ai_message
 r.get('/api/briefing', { admin: true }, (ctx) => {
   const oid = ctx.oid, today = L.istDate(), td = L.dayRange(today), yd = L.dayRange(L.istDate(Date.now() - 864e5));
   const count = (sql, ...a) => get(sql, ...a).c;
-  const calls = (rg) => get("SELECT COUNT(*) c, SUM(CASE WHEN outcome='Connected' THEN 1 ELSE 0 END) ok FROM activities WHERE org_id=? AND type='call' AND COALESCE(outcome,'')<>'Initiated' AND created_at>=? AND created_at<?", oid, rg.from, rg.to);
+  const calls = (rg) => get(`SELECT COUNT(*) c, SUM(CASE WHEN outcome IN (${L.TALKED_SQL}) THEN 1 ELSE 0 END) ok FROM activities WHERE org_id=? AND type='call' AND COALESCE(outcome,'')<>'Initiated' AND created_at>=? AND created_at<?`, oid, rg.from, rg.to);
   const leadsIn = (rg) => count('SELECT COUNT(*) c FROM leads WHERE org_id=? AND created_at>=? AND created_at<?', oid, rg.from, rg.to);
   const c1 = calls(td), c0 = calls(yd);
   const sales = get("SELECT COUNT(*) c, COALESCE(SUM(total),0) v FROM bookings WHERE org_id=? AND status<>'cancelled' AND booked_on=?", oid, today);

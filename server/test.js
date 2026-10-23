@@ -215,6 +215,15 @@ const RVtoken = () => 'not-a-real-token';
   x = await call('GET', `/api/plots/${p2.id}/price`, null, A); ok(x.body.plot.status === 'available', 'cancelled booking releases plot', x.body.plot.status);
   x = await call('DELETE', `/api/leads/${L3}`, null, A); ok(x.status === 400, 'leads with booking history cannot be deleted');
 
+  section('Call outcomes');
+  x = await call('POST', '/api/leads', { name: 'Outcome Test', phone: '9777700001', source: 'Walk-in' }, A); const oid_ = x.body.id;
+  x = await call('POST', `/api/leads/${oid_}/calls`, { direction: 'outgoing', outcome: 'Ringing', duration_min: 3 }, A); ok(x.status === 200, 'Ringing is an accepted call outcome', x.body);
+  x = await call('GET', `/api/leads/${oid_}`, null, A); ok(x.body.lead.stage === 'New' && x.body.timeline.find((t) => t.outcome === 'Ringing')?.duration === 0, 'a Ringing call has no duration and does not move the lead to Contacted');
+  for (const o of ['Not Picked', 'Update Later', 'Not Interested', 'Interview Scheduled']) { x = await call('POST', `/api/leads/${oid_}/calls`, { direction: 'outgoing', outcome: o, duration_min: 1 }, A); ok(x.status === 200, `${o} is accepted`, x.body); }
+  x = await call('GET', `/api/leads/${oid_}`, null, A); ok(x.body.lead.stage === 'Contacted', 'a conversation outcome moves a New lead to Contacted', x.body.lead.stage);
+  ok(x.body.timeline.find((t) => t.outcome === 'Interview Scheduled')?.duration === 60, 'conversation outcomes keep their duration');
+  x = await call('POST', `/api/leads/${oid_}/calls`, { direction: 'outgoing', outcome: 'Nonsense' }, A); ok(x.status === 400, 'unknown outcome is refused');
+
   section('Aaj ka haal');
   x = await call('GET', '/api/briefing', null, A); ok(x.status === 200 && x.body.numbers && Array.isArray(x.body.alerts) && x.body.alerts.length <= 3 && Array.isArray(x.body.reps), 'owner briefing: numbers, at most 3 alerts, rep list', x.body);
   ok(x.body.alerts.every((a) => a.title && a.href), 'every alert has a title and a link');
