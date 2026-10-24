@@ -602,7 +602,7 @@ export function callModal(l, done, activityId) {
   modalForm({ title: `${activityId ? 'Call result' : 'Log call'} — ${l.name}`, submit: 'Save', body: `${activityId ? '<p class="muted">Your phone did not report this call. Fill in what happened.</p>' : ''}
     <div class="fsec first">How did it go?</div><div class="chips" id="cres">${CALL_RESULTS.map((r) => `<button type="button" class="chip-btn" data-r="${r.k}">${ico(r.icon, 'sm')}${r.label}</button>`).join('')}</div>
     <div id="lostw" class="hidden">${fld('Lost reason <span class="req">*</span>', sel('lost_reason', [['', 'Choose a reason…'], ...S.meta.lost_reasons]), 'The lead will be marked Lost')}</div>
-    <div class="frm-g" style="margin-top:var(--s3)">${fld('Direction', sel('direction', [['outgoing', 'Outgoing'], ['incoming', 'Incoming']]))}${fld('Status', sel('outcome', [['Connected', 'Completed'], ['Not Answered', 'No Answer'], ['Ringing', 'Ringing'], ['Busy', 'Busy'], ['Not Picked', 'Not picked'], ['Not Interested', 'Not interested'], ['Update Later', 'Update later'], ['Interview Scheduled', 'Interview scheduled'], 'Rejected', 'Failed', 'Switched Off', 'Wrong Number', 'Voicemail', 'Missed']))}
+    <div class="frm-g" style="margin-top:var(--s3)">${fld('Direction', sel('direction', [['outgoing', 'Outgoing'], ['incoming', 'Incoming']]), '', 'full')}<input type="hidden" name="outcome" value="">
     ${fld('Duration (min)', inp('duration_min', '', 'type="number" min="0" placeholder="0"'))}${fld('Seconds', inp('duration_sec', '', 'type="number" min="0" max="59" placeholder="0"'))}
     ${fld('Notes', '<textarea name="notes" placeholder="What was discussed?"></textarea>', '', 'full')}
     ${fld('Next follow-up', inp('follow_at', '', 'type="datetime-local"'), 'Leave empty if no follow-up is needed', 'full')}</div>
@@ -623,6 +623,7 @@ export function callModal(l, done, activityId) {
     },
     onSubmit: async (d) => {
       const quick = res ? CALL_RESULTS.find((x) => x.k === res) : null;
+      if (!d.outcome) throw new Error('Choose how the call went');
       if (quick?.lost && !d.lost_reason) throw new Error('Choose why the lead is lost');
       // a quick result says the call connected even without a stopwatch reading: record it as at least a few seconds
       const dur = (Number(d.duration_min) || 0) * 60 + (Number(d.duration_sec) || 0);
