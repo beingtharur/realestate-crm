@@ -296,10 +296,12 @@ document.addEventListener('keydown', (e) => {
     if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); } else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
   }
 });
+// While any modal/drawer is open the page behind it must not scroll (or show through on phones).
+const syncScrollLock = () => document.documentElement.classList.toggle('has-layer', layers.length > 0);
 function makeLayer(wrap, onClose) {
   const prev = document.activeElement; let closed = false;
-  const layer = { el: wrap, close() { if (closed) return; closed = true; wrap.remove(); const i = layers.indexOf(layer); if (i >= 0) layers.splice(i, 1); onClose && onClose(); try { prev && prev.focus && prev.isConnected && prev.focus(); } catch { /* ignore */ } } };
-  layers.push(layer); return layer;
+  const layer = { el: wrap, close() { if (closed) return; closed = true; wrap.remove(); const i = layers.indexOf(layer); if (i >= 0) layers.splice(i, 1); syncScrollLock(); onClose && onClose(); try { prev && prev.focus && prev.isConnected && prev.focus(); } catch { /* ignore */ } } };
+  layers.push(layer); syncScrollLock(); return layer;
 }
 export function modal({ title, body, footer = '', wide = false, xl = false, onOpen }) {
   const wrap = document.createElement('div'); wrap.className = 'modal-wrap';

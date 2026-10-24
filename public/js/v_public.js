@@ -45,7 +45,7 @@ export async function enquire(root, { code }) {
   let org;
   try { org = await pub('GET', '/public/org/' + code); } catch (e) { root.innerHTML = `<div class="auth"><div class="card"><div class="err">${esc(e.message)}</div></div></div>`; return; }
   root.innerHTML = `<div class="auth"><div class="card"><div class="logo">🏡 ${esc(org.name)}</div><h1>Plot enquiry</h1><p class="muted">Tell us what you're looking for and our team will call you shortly.</p><div id="e"></div><form id="f">
-    ${fld('Your name *', inp('name', '', 'required'))}${fld('Mobile number *', inp('phone', '', 'required inputmode="tel" placeholder="98765 43210"'))}${fld('Email', inp('email', '', 'type="email"'))}
+    ${fld('Your name *', inp('name', '', 'required'))}${fld('Mobile number *', inp('phone', '', 'required data-v="phone" inputmode="tel" placeholder="98765 43210"'))}${fld('Email', inp('email', '', 'type="email"'))}
     ${org.projects.length ? fld('Interested project', sel('project_id', [['', 'Not sure yet'], ...org.projects.map((p) => [p.id, p.name + (p.location ? ' — ' + p.location : '')])])) : ''}${fld('Preferred plot size (sq.yd)', inp('size', '', 'type="number"'))}${fld('Message', '<textarea name="message"></textarea>')}
     <input name="website" tabindex="-1" autocomplete="off" style="position:absolute;left:-9999px" aria-hidden="true">
     <label class="row mb"><input type="checkbox" name="consent"> <span class="small">I agree to be contacted by ${esc(org.name)} by phone, SMS and WhatsApp about my enquiry.</span></label>

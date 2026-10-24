@@ -18,7 +18,7 @@ export function bookingWizard({ lead = null, plot = null, onDone } = {}) {
       <div class="frm-g">${fld('Project', sel('project_id', projects.map((p) => [p.id, p.name]), plot?.project_id || lead?.pref_project_id || projects[0].id))}${fld('Plot', '<select name="plot_id"></select>')}</div>
       <div id="pbox" class="card mb" style="background:var(--surface2)"></div>
       <div class="frm-g">${admin ? fld('Discount (₹)', inp('discount', '', 'type="number" min="0" placeholder="0"'), '<span id="dnote"></span>') : ''}${fld('Booking date', inp('booked_on', today(), `type="date" max="${today()}"`))}</div>
-      <h3 class="mb mt">Buyer details</h3><div class="frm-g">${fld('Buyer name', inp('buyer_name', lead?.name || ''))}${fld('Buyer mobile', inp('buyer_phone', lead?.phone_norm || ''))}${fld('PAN (optional)', inp('buyer_pan', '', 'maxlength="10" style="text-transform:uppercase"'))}
+      <h3 class="mb mt">Buyer details</h3><div class="frm-g">${fld('Buyer name', inp('buyer_name', lead?.name || ''))}${fld('Buyer mobile', inp('buyer_phone', lead?.phone_norm || '', 'data-v="phone" inputmode="tel"'))}${fld('PAN (optional)', inp('buyer_pan', '', 'maxlength="10" style="text-transform:uppercase"'))}
         ${fld('Channel partner', sel('partner_id', [['', lead?.partner_id ? 'From lead' : 'Direct (none)'], ...S.meta.partners.filter((p) => p.active).map((p) => [p.id, `${p.name} (${p.commission_pct}%)`])]))}${fld('Address', inp('buyer_address'), '', 'full')}</div></div>
     <div><h3 class="mb">2 · Token & payment plan</h3>
       <div class="frm-g">${fld('Token / booking amount received (₹) <span class="req">*</span>', inp('token_amount', '', 'type="number" min="1"'))}${fld('Received via', sel('token_mode', MODES, 'UPI'))}${fld('Reference no. (UTR / cheque)', inp('token_ref'))}<div></div></div>
@@ -152,7 +152,7 @@ export async function detail(root, { id }, q) {
   on(root, 'click', '[data-a]', async (el) => {
     const a = el.dataset.a, b = cur.booking;
     if (a === 'pay') return paymentModal(b, cur.summary, cur.installments, load);
-    if (a === 'edit') return modalForm({ title: 'Buyer details', body: `<div class="frm-g">${fld('Name', inp('buyer_name', b.buyer_name))}${fld('Mobile', inp('buyer_phone', b.buyer_phone))}${fld('PAN', inp('buyer_pan', b.buyer_pan || '', 'maxlength="10"'))}${fld('Address', inp('buyer_address', b.buyer_address || ''))}${fld('Notes', `<textarea name="notes">${esc(b.notes || '')}</textarea>`, '', 'full')}</div>`, onSubmit: async (d) => { await patch('/bookings/' + id, d); toast('Saved', 'ok'); load(); } });
+    if (a === 'edit') return modalForm({ title: 'Buyer details', body: `<div class="frm-g">${fld('Name', inp('buyer_name', b.buyer_name))}${fld('Mobile', inp('buyer_phone', b.buyer_phone, 'data-v="phone" inputmode="tel"'))}${fld('PAN', inp('buyer_pan', b.buyer_pan || '', 'maxlength="10"'))}${fld('Address', inp('buyer_address', b.buyer_address || ''))}${fld('Notes', `<textarea name="notes">${esc(b.notes || '')}</textarea>`, '', 'full')}</div>`, onSubmit: async (d) => { await patch('/bookings/' + id, d); toast('Saved', 'ok'); load(); } });
     if (a === 'agreement' || a === 'register') {
       const st = a === 'agreement' ? 'agreement' : 'registered';
       return modalForm({ title: st === 'agreement' ? 'Agreement of sale signed' : 'Sale deed registered', body: fld('Date', inp('date', today(), `type="date" max="${today()}"`)), onSubmit: async (d) => {
