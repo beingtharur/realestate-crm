@@ -1,5 +1,5 @@
 // Daily work: follow-up tasks, site visit planner, call/WhatsApp log (+ webhooks & templates), lead router.
-import { S, $, $$, esc, get, post, put, del, on, modal, modalForm, confirmDialog, toast, fld, inp, sel, repOptions, projectOptions, inr, inrShort, rel, fmtDT, fmtDate, fmtTime, dtLocal, fromDT,
+import { loadMeta, S, $, $$, esc, get, post, put, del, on, modal, modalForm, confirmDialog, toast, fld, inp, sel, repOptions, projectOptions, inr, inrShort, rel, fmtDT, fmtDate, fmtTime, dtLocal, fromDT,
   isAdmin, empty, badge, stageBadge, phoneFmt, nav, reload, leadPicker, wireLeadPickers, userName, spinner, fullLink, copy, authUrl, callLabel, callCls, mmss, quickActions, ico, avatar } from './core.js';
 import { taskModal, visitModal, callModal } from './v_leads.js';
 import { projectForm } from './v_inventory.js';
@@ -44,6 +44,7 @@ export async function tasks(root, _p, q) {
 export async function visits(root) {
   const admin = isAdmin(); let when = 'upcoming';
   const draw = async () => {
+    try { await loadMeta(); } catch { /* keep the list we have */ }
     const rows = await get('/visits?when=' + when);
     root.innerHTML = `<div class="ph1"><div><h1>Site visit planner</h1><p>Schedule visits, arrange pickups and capture feedback</p></div><div class="row">${admin ? '<button class="btn" id="np">＋ Add property / project</button>' : ''}<button class="btn primary" id="pv">＋ Schedule visit</button></div></div>
     ${!S.meta.projects.length ? `<div class="warn-box">No projects exist yet. ${admin ? 'Add a property first, then schedule visits.' : 'Ask your admin to add projects.'}</div>` : ''}

@@ -476,7 +476,7 @@ function buildCombo(s) {
     document.querySelectorAll('.combo.open .combo-btn').forEach((b) => b.click());
     pop = document.createElement('div'); pop.className = 'combo-pop'; pop.innerHTML = `<input type="search" class="combo-q" placeholder="Search…" aria-label="Search options" autocomplete="off" data-native><ul class="combo-list" role="listbox"></ul>`;
     box.append(pop); box.classList.add('open'); btn.setAttribute('aria-expanded', 'true');
-    if (innerWidth <= 900) { scrim = document.createElement('div'); scrim.className = 'menu-scrim'; scrim.onclick = close; document.body.append(scrim); }
+    if (innerWidth <= 900) { scrim = document.createElement('div'); scrim.className = 'menu-scrim'; scrim.onclick = close; (s.closest('.modal-wrap, .drawer-wrap') || document.body).append(scrim); }
     act = Math.max(0, options().findIndex((o) => o.v === s.value)); paint(''); const q = $('.combo-q', pop);
     const touch = matchMedia('(pointer:coarse)').matches;
     if (!touch || options().length > 12) q.focus(); else q.style.display = 'none'; // on a phone a short list needs no keyboard

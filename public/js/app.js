@@ -335,6 +335,25 @@ async function invitePage(root, { token }) {
   $('#f').onsubmit = async (e) => { e.preventDefault(); try { const r = await api('POST', '/auth/accept-invite', { token, name: $('[name=name]').value, password: $('[name=password]').value }); store.set('rp_invited', '1'); toast('Account created — sign in now', 'ok'); go(`#/login?email=${encodeURIComponent(r.email)}&invited=1`); } catch (err) { $('#e').innerHTML = `<div class="err">${esc(err.message)}</div>`; } };
 }
 
+// ---------- call-log prompt after returning from the dialer (phones that are not linked to the companion app) ----------
+const PENDING_CALL = 'rp_pending_call';
+const readPendingCall = () => { try { const p = JSON.parse(store.get(PENDING_CALL) || 'null'); return p && Date.now() - p.at < 6 * 3600e3 ? p : null; } catch { return null; } };
+function armCallReturn(leadId, name) { store.set(PENDING_CALL, JSON.stringify({ leadId, name, at: Date.now(), left: false })); }
+function promptPendingCall() {
+  const p = readPendingCall(); if (!p || !p.left || !S.user) return;
+  store.set(PENDING_CALL, null);
+  const open = () => leads.callModal({ id: p.leadId, name: p.name }, () => location.hash.startsWith('#/leads/' + p.leadId) && reload());
+  // back within a few seconds = probably never dialled: a gentle snackbar; otherwise ask straight away
+  if (document.querySelector('.modal-wrap') || Date.now() - p.at < 8000) return snack(`Called ${p.name}? Log how it went.`, 'Log call', open);
+  open();
+}
+const markLeft = () => { const p = readPendingCall(); if (p && !p.left) store.set(PENDING_CALL, JSON.stringify({ ...p, left: true })); };
+document.addEventListener('visibilitychange', () => (document.visibilityState === 'hidden' ? markLeft() : promptPendingCall()));
+window.addEventListener('pagehide', markLeft);
+window.addEventListener('blur', () => setTimeout(() => document.hasFocus() || markLeft(), 300));   // desktop: the dialer app took focus
+window.addEventListener('focus', () => setTimeout(promptPendingCall, 400));
+window.addEventListener('pageshow', () => setTimeout(promptPendingCall, 400));
+
 // ---------- CALL buttons (any <a data-call="leadId" href="tel:…">) ----------
 // The link opens the phone dialer as before. We also tell the server, so a linked phone app can report the
 // real duration afterwards; without a linked phone the user is offered the manual "Log call" form.
@@ -343,7 +362,7 @@ document.addEventListener('click', (e) => {
   const leadId = Number(a.dataset.call), name = a.dataset.callName || 'this lead';
   const onLead = () => location.hash.startsWith('#/leads/' + leadId) && !document.querySelector('.modal-wrap');
   post(`/leads/${leadId}/call-intent`).then((r) => {
-    if (!r.tracked) return snack(`Called ${name}? Log how it went.`, 'Log call', () => leads.callModal({ id: leadId, name }, () => onLead() && reload()));
+    if (!r.tracked) return armCallReturn(leadId, name);   // ask for the call log when the user comes BACK from the dialer, not while the call is happening
     toast('Calling… the result will appear here when you hang up', 'ok');
     if (onLead()) reload();
     const back = () => { // refresh the timeline a few times once the user returns from the dialer
@@ -370,5 +389,5 @@ async function bootstrap() {
 (async function boot() {
   applyDensity(); initUi();
   if (S.token) { try { await bootstrap(); } catch { S.token = ''; store.set('rp_token', null); S.user = null; } }
-  route();
+  route(); setTimeout(promptPendingCall, 800);
 })();

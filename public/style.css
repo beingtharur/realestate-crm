@@ -409,6 +409,7 @@ code{white-space:normal}
 .menu.floating.sheet{left:var(--s2);right:var(--s2);top:auto;bottom:calc(var(--s2) + env(safe-area-inset-bottom));border-radius:var(--r-xl);padding:var(--s2);animation:sheetin .22s var(--ease)}
 .menu.floating.sheet button{min-height:48px;font-size:var(--fs-lg)}
 .menu-scrim{position:fixed;inset:0;background:var(--scrim);z-index:120;animation:fade var(--t)}
+.modal-wrap>.menu-scrim,.drawer-wrap>.menu-scrim{z-index:79}  /* inside a dialog: above the form, below the open option list (.combo-pop is 80) */
 .filters{display:flex;gap:var(--s2);flex-wrap:wrap;align-items:center;margin-bottom:var(--s3)}.filters input,.filters select{width:auto;min-width:140px}.filters input[type=search]{min-width:220px}.filters .combo{min-width:170px}
 @media(max-width:900px){.filters{display:grid;grid-template-columns:1fr 1fr}.filters>*{width:100%!important;min-width:0!important}.filters>input[type=search],.filters>.seg{grid-column:1/-1}.filters .seg{display:flex}.filters .btn{justify-content:center}}
 .cmd-wrap{position:fixed;inset:0;background:var(--scrim);z-index:200;display:flex;justify-content:center;align-items:flex-start;padding:10vh var(--s3) var(--s3);animation:fade var(--t)}

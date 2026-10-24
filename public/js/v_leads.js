@@ -1,7 +1,7 @@
 // Leads: list (list / cards / board), filters, bulk actions, lead drawer, lead page, add/edit form, import.
 import { repLoads, loadOptions, S, $, $$, esc, get, post, patch, del, api, on, modal, modalForm, confirmDialog, askText, toast, fld, inp, sel, repOptions, projectOptions, getForm, inr, inrShort, rel, fmtDT, fmtDate, fmtTime, friendlyDT, dayLabel, dayHeading, istDay,
   isAdmin, empty, errorState, badge, stageBadge, ratingBadge, statusChip, phoneFmt, waLink, nav, reload, userName, dtLocal, fromDT, copy, fullLink, authUrl, saveTextFile, debounce, skeleton, STAGE_CLS, callLabel, callCls, mmss,
-  quickActions, ico, avatar, drawer, openMenu, store, rememberLead, today, enhanceSelects } from './core.js';
+  quickActions, ico, avatar, drawer, openMenu, store, rememberLead, today, enhanceSelects, loadMeta } from './core.js';
 import { bookingWizard } from './v_bookings.js';
 
 const STAGES = () => S.meta.stages;
@@ -647,6 +647,7 @@ export function taskModal(l, done) {
     onSubmit: async (d) => { await post('/tasks', { ...d, lead_id: l?.id, due_at: fromDT(d.due_at), assigned_to: d.assigned_to ? Number(d.assigned_to) : undefined }); toast('Task created', 'ok'); done && done(); } });
 }
 export async function visitModal(l, done, presetPlot) {
+  try { await loadMeta(); } catch { /* keep the list we have */ }
   const projects = S.meta.projects.filter((p) => p.status === 'active');
   if (!projects.length) return modal({ title: 'No projects yet', body: `<p>Add a project (layout) before scheduling site visits.</p>${isAdmin() ? '<a class="btn primary" href="#/inventory" data-close>Go to Inventory</a>' : '<p class="muted">Ask your admin to add a project.</p>'}` });
   const m = modalForm({ title: `Schedule site visit — ${l.name}`, submit: 'Schedule visit', body: `<div class="frm-g">${fld('Project', sel('project_id', projects.map((p) => [p.id, p.name]), l.pref_project_id || projects[0].id))}${fld('Specific plot (optional)', '<select name="plot_id"><option value="">Show all available</option></select>')}
